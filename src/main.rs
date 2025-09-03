@@ -13,6 +13,7 @@ const BULLET_SPEED: f32 = 40.0; // m/s
 const BULLET_LIFETIME: f32 = 2.0; // sec
 const GRAVITY: f32 = 9.81; // m/s^2
 const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
+const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
 
 #[derive(Component)]
 struct Player;
@@ -61,6 +62,7 @@ fn main() {
         .add_systems(Update, (
             cursor_lock_controls,
             mouse_look_system,
+            keyboard_look_system,
             kcc_move_system,
             kcc_post_step_system,
             shoot_system,
@@ -227,6 +229,37 @@ fn mouse_look_system(
     }
 }
 
+fn keyboard_look_system(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut q: ParamSet<(
+        Query<&mut Transform, (With<Player>, Without<Camera3d>)>,
+        Query<(&mut Transform, &mut PlayerCamera), With<Camera3d>>,
+    )>,
+) {
+    let dt = time.delta_seconds();
+    let horiz = (keys.pressed(KeyCode::ArrowRight) as i32 - keys.pressed(KeyCode::ArrowLeft) as i32) as f32;
+    let vert = (keys.pressed(KeyCode::ArrowDown) as i32 - keys.pressed(KeyCode::ArrowUp) as i32) as f32;
+    if horiz == 0.0 && vert == 0.0 { return; }
+
+    let mut new_yaw = 0.0f32;
+    let mut new_pitch = 0.0f32;
+    {
+        let mut cam_query = q.p1();
+        let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else { return };
+        // 矢印キー: 右=右回転（マウスの正方向と同じく yaw を減算）、上=上向き（pitch 減算）
+        pcam.yaw -= horiz * KEY_LOOK_SPEED * dt;
+        pcam.pitch = (pcam.pitch - vert * KEY_LOOK_SPEED * dt).clamp(-1.54, 1.54);
+        new_yaw = pcam.yaw;
+        new_pitch = pcam.pitch;
+        cam_tf.rotation = Quat::from_rotation_x(new_pitch);
+    }
+    let mut player_query = q.p0();
+    if let Ok(mut player_tf) = player_query.get_single_mut() {
+        player_tf.rotation = Quat::from_rotation_y(new_yaw);
+    }
+}
+
 fn kcc_move_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -281,12 +314,13 @@ fn kcc_post_step_system(
 
 fn shoot_system(
     buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     cam_global_q: Query<&GlobalTransform, With<Camera3d>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !buttons.just_pressed(MouseButton::Left) {
+    if !(buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF)) {
         return;
     }
     let cam_g = if let Ok(v) = cam_global_q.get_single() { v } else { return };
