@@ -1,15 +1,18 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::CursorGrabMode;
+use bevy_rapier3d::prelude::*;
 
 // ===== Config =====
 const MAP_SCENE_PATH: &str = "maps/map.glb#Scene0"; // assets 配下に maps/map.glb を置いてください
-const PLAYER_START: Vec3 = Vec3::new(0.0, 1.6, 5.0);
+const PLAYER_START: Vec3 = Vec3::new(0.0, 5.0, 5.0);
 const MOVE_SPEED: f32 = 6.0; // m/s
 const RUN_MULTIPLIER: f32 = 1.7;
 const MOUSE_SENSITIVITY: f32 = 0.0018; // rad/pixel
 const BULLET_SPEED: f32 = 40.0; // m/s
 const BULLET_LIFETIME: f32 = 2.0; // sec
+const GRAVITY: f32 = 9.81; // m/s^2
+const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
 
 #[derive(Component)]
 struct Player;
@@ -30,6 +33,12 @@ struct Bullet {
 #[derive(Resource, Default)]
 struct CursorLocked(pub bool);
 
+#[derive(Component, Default)]
+struct Controller {
+    vy: f32,
+    on_ground: bool,
+}
+
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::rgb(0.02, 0.02, 0.03)))
@@ -43,13 +52,20 @@ fn main() {
             }),
             ..default()
         }))
-        .add_systems(Startup, (setup_world, setup_player, setup_ui))
+        .add_plugins((
+            RapierPhysicsPlugin::<NoUserData>::default(),
+            // デバッグ表示が欲しい場合は下を有効化
+            // RapierDebugRenderPlugin::default(),
+        ))
+        .add_systems(Startup, (setup_world, setup_player, setup_ui, setup_physics))
         .add_systems(Update, (
             cursor_lock_controls,
             mouse_look_system,
-            player_move_system,
+            kcc_move_system,
+            kcc_post_step_system,
             shoot_system,
             bullet_move_and_despawn,
+            add_mesh_colliders_for_map,
         ))
         .run();
 }
@@ -77,6 +93,10 @@ fn setup_world(mut commands: Commands, asset_server: Res<AssetServer>) {
     ));
 }
 
+fn setup_physics(mut conf: ResMut<RapierConfiguration>) {
+    conf.gravity = Vec3::new(0.0, -GRAVITY, 0.0);
+}
+
 fn setup_player(mut commands: Commands, mut windows: Query<&mut Window>) {
     // プレイヤー本体（位置と yaw を持つ）
     let player = commands
@@ -87,11 +107,18 @@ fn setup_player(mut commands: Commands, mut windows: Query<&mut Window>) {
                 ..default()
             },
         ))
+        // キャラクターコントローラと当たり判定（カプセル）
+        .insert((
+            Collider::capsule_y(0.6, 0.3), // 全高 ~1.8m（0.6*2 + 0.3*2）
+            KinematicCharacterController::default(),
+            Controller::default(),
+        ))
         .id();
 
     // カメラはプレイヤーの子: pitch はカメラにのみ反映
+    // 目線の高さ（プレイヤー中心から +0.7m）
     let cam = Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 0.0, 0.0),
+        transform: Transform::from_xyz(0.0, 0.7, 0.0),
         camera: Camera { hdr: true, ..default() },
         ..default()
     };
@@ -181,48 +208,74 @@ fn mouse_look_system(
     }
 
     // まずカメラ側で yaw/pitch を更新し、必要値をローカルに保持
-    let mut yaw_pitch: Option<(f32, f32)> = None;
+    let mut new_yaw: f32 = 0.0;
+    let mut new_pitch: f32 = 0.0;
     {
         let mut cam_query = q.p1();
         let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else { return };
         pcam.yaw -= delta.x * MOUSE_SENSITIVITY;
         pcam.pitch = (pcam.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-1.54, 1.54);
-        yaw_pitch = Some((pcam.yaw, pcam.pitch));
+        new_yaw = pcam.yaw;
+        new_pitch = pcam.pitch;
         cam_tf.rotation = Quat::from_rotation_x(pcam.pitch);
     }
 
     // 次にプレイヤーの yaw 回転を反映（別スコープで別クエリを借用）
-    if let Some((yaw, _pitch)) = yaw_pitch {
-        let mut player_query = q.p0();
-        if let Ok(mut player_tf) = player_query.get_single_mut() {
-            player_tf.rotation = Quat::from_rotation_y(yaw);
-        }
+    let mut player_query = q.p0();
+    if let Ok(mut player_tf) = player_query.get_single_mut() {
+        player_tf.rotation = Quat::from_rotation_y(new_yaw);
     }
 }
 
-fn player_move_system(
+fn kcc_move_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     cam_q: Query<&PlayerCamera, With<Camera3d>>,
-    mut player_q: Query<&mut Transform, (With<Player>, Without<Camera3d>)>,
+    mut q: Query<(&mut KinematicCharacterController, &mut Controller), With<Player>>,
 ) {
-    let mut tf = if let Ok(v) = player_q.get_single_mut() { v } else { return };
+    let (mut kcc, mut ctrl) = if let Ok(v) = q.get_single_mut() { v } else { return };
     let cam = if let Ok(v) = cam_q.get_single() { v } else { return };
 
+    // 入力（水平面）
     let mut input = Vec3::ZERO;
     if keys.pressed(KeyCode::KeyW) { input += Vec3::NEG_Z; }
     if keys.pressed(KeyCode::KeyS) { input += Vec3::Z; }
     if keys.pressed(KeyCode::KeyA) { input += Vec3::NEG_X; }
     if keys.pressed(KeyCode::KeyD) { input += Vec3::X; }
 
+    let mut horiz = Vec3::ZERO;
     if input.length_squared() > 1e-6 {
         let yaw_rot = Quat::from_rotation_y(cam.yaw);
-        let dir = yaw_rot * input.normalize();
-        let mut speed = MOVE_SPEED;
-        if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
-            speed *= RUN_MULTIPLIER;
+        horiz = (yaw_rot * input).normalize();
+    }
+
+    // スピード調整
+    let mut speed = MOVE_SPEED;
+    if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+        speed *= RUN_MULTIPLIER;
+    }
+
+    // 重力・ジャンプ
+    let dt = time.delta_seconds();
+    ctrl.vy -= GRAVITY * dt;
+    if keys.just_pressed(KeyCode::Space) && ctrl.on_ground {
+        ctrl.vy = JUMP_SPEED;
+        ctrl.on_ground = false;
+    }
+
+    let motion = horiz * speed * dt + Vec3::Y * ctrl.vy * dt;
+    kcc.translation = Some(motion);
+}
+
+fn kcc_post_step_system(
+    mut q: Query<(&mut Controller, Option<&KinematicCharacterControllerOutput>), With<Player>>,
+) {
+    let (mut ctrl, output) = if let Ok(v) = q.get_single_mut() { v } else { return };
+    if let Some(out) = output {
+        ctrl.on_ground = out.grounded;
+        if out.grounded && ctrl.vy <= 0.0 {
+            ctrl.vy = 0.0;
         }
-        tf.translation += dir * speed * time.delta_seconds();
     }
 }
 
@@ -283,6 +336,21 @@ fn bullet_move_and_despawn(
         }
         if b.speed > 0.0 {
             tf.translation += b.dir * b.speed * time.delta_seconds();
+        }
+    }
+}
+
+// GLBのメッシュに静的コライダーを自動付与
+fn add_mesh_colliders_for_map(
+    mut commands: Commands,
+    meshes: Res<Assets<Mesh>>,
+    q: Query<(Entity, &Handle<Mesh>), (Added<Handle<Mesh>>, Without<Collider>, Without<Bullet>, Without<Player>)>,
+) {
+    for (e, h) in &q {
+        if let Some(mesh) = meshes.get(h) {
+            if let Some(collider) = Collider::from_bevy_mesh(mesh, &ComputedColliderShape::TriMesh) {
+                commands.entity(e).insert((collider, RigidBody::Fixed));
+            }
         }
     }
 }
