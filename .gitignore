@@ -1,1 +1,34 @@
-/target
+# --- Rust / Cargo ---
+/target/
+**/*.rs.bk
+
+# Keep Cargo.lock for applications (do not ignore)
+# !Cargo.lock
+
+# --- Bevy / Wasm (optional toolchains) ---
+/dist/
+/pkg/
+/wasm-pack-log.txt
+.parcel-cache/
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.iml
+
+# --- Logs / temp ---
+*.log
+*.tmp
+*~
+*.swp
+*.swo
+
+# --- Windows binaries outside target (safety) ---
+/*.exe
+/*.dll
+/*.pdb
