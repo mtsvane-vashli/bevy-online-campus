@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::CursorGrabMode;
