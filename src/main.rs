@@ -4,10 +4,17 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::CursorGrabMode;
 use bevy_rapier3d::prelude::*;
+use bevy_renet::RenetClientPlugin;
+use bevy_renet::transport::NetcodeClientPlugin;
+use bevy_renet::renet::RenetClient;
+
+#[path = "net.rs"]
+mod net;
+use net::*;
 
 // ===== Config =====
 const MAP_SCENE_PATH: &str = "maps/map.glb#Scene0"; // assets 配下に maps/map.glb を置いてください
-const PLAYER_START: Vec3 = Vec3::new(0.0, 5.0, 5.0);
+const PLAYER_START: Vec3 = Vec3::new(0.0, 10.0, 5.0);
 const MOVE_SPEED: f32 = 6.0; // m/s
 const RUN_MULTIPLIER: f32 = 1.7;
 const MOUSE_SENSITIVITY: f32 = 0.0018; // rad/pixel
@@ -44,7 +51,7 @@ struct Controller {
 
 fn main() {
     App::new()
-        .insert_resource(ClearColor(Color::rgb(0.02, 0.02, 0.03)))
+        .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
         .insert_resource(AmbientLight { color: Color::WHITE, brightness: 300.0 })
         .insert_resource(CursorLocked(true))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -55,21 +62,26 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins((RenetClientPlugin, NetcodeClientPlugin))
         .add_plugins((
             RapierPhysicsPlugin::<NoUserData>::default(),
             // デバッグ表示が欲しい場合は下を有効化
             // RapierDebugRenderPlugin::default(),
         ))
-        .add_systems(Startup, (setup_world, setup_player, setup_ui, setup_physics))
+        .add_systems(Startup, (setup_world, setup_player, setup_ui, setup_physics, setup_net_client))
         .add_systems(Update, (
             cursor_lock_controls,
             mouse_look_system,
             keyboard_look_system,
             kcc_move_system,
             kcc_post_step_system,
+            reconcile_self,
             shoot_system,
             bullet_move_and_despawn,
             add_mesh_colliders_for_map,
+            net_send_input,
+            net_recv_snapshot,
+            net_recv_events,
         ))
         .run();
 }
@@ -155,7 +167,7 @@ fn setup_ui(mut commands: Commands) {
             "＋",
             TextStyle {
                 font_size: 18.0,
-                color: Color::rgb(1.0, 1.0, 1.0),
+                color: Color::srgb(1.0, 1.0, 1.0),
                 ..default()
             },
         ));
@@ -327,12 +339,12 @@ fn shoot_system(
     }
     let cam_g = if let Ok(v) = cam_global_q.get_single() { v } else { return };
 
-    let forward = cam_g.forward();
+    let forward: Vec3 = cam_g.forward().into();
     let start = cam_g.translation();
 
     // 小さな弾体（可視化用）
     let mesh = meshes.add(Sphere::new(0.04).mesh().ico(4).unwrap());
-    let mat = materials.add(Color::rgb(1.0, 0.9, 0.2));
+    let mat = materials.add(Color::srgb(1.0, 0.9, 0.2));
 
     commands.spawn((
         PbrBundle {
@@ -388,5 +400,172 @@ fn add_mesh_colliders_for_map(
                 commands.entity(e).insert((collider, RigidBody::Fixed));
             }
         }
+    }
+}
+
+// --- Networking (client) ---
+
+#[derive(Component)]
+struct RemoteAvatar { id: u64 }
+
+#[derive(Resource, Default)]
+struct RemoteMap(std::collections::HashMap<u64, Entity>);
+
+#[derive(Resource)]
+struct LocalNetInfo { id: u64 }
+
+#[derive(Resource, Default)]
+struct InputSeq(u32);
+
+#[derive(Resource, Default)]
+struct AuthoritativeSelf { pos: Option<Vec3>, yaw: Option<f32> }
+
+#[derive(Resource)]
+struct LocalHealth { hp: u16 }
+
+fn setup_net_client(mut commands: Commands) {
+    let (client, transport, client_id) = new_client(None);
+    commands.insert_resource(client);
+    commands.insert_resource(transport);
+    commands.insert_resource(LocalNetInfo { id: client_id.raw() });
+    commands.insert_resource(RemoteMap::default());
+    commands.insert_resource(InputSeq::default());
+    commands.insert_resource(AuthoritativeSelf::default());
+    commands.insert_resource(LocalHealth { hp: 100 });
+}
+
+fn net_send_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    cam_q: Query<&PlayerCamera, With<Camera3d>>,
+    mut client: ResMut<RenetClient>,
+    mut seq: ResMut<InputSeq>,
+) {
+    let cam = if let Ok(c) = cam_q.get_single() { c } else { return };
+    let mut mv = [0.0f32, 0.0f32];
+    if keys.pressed(KeyCode::KeyW) { mv[1] -= 1.0; }
+    if keys.pressed(KeyCode::KeyS) { mv[1] += 1.0; }
+    if keys.pressed(KeyCode::KeyA) { mv[0] -= 1.0; }
+    if keys.pressed(KeyCode::KeyD) { mv[0] += 1.0; }
+    let run = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let jump = keys.just_pressed(KeyCode::Space);
+    let fire = buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF);
+    seq.0 = seq.0.wrapping_add(1);
+    let frame = InputFrame { seq: seq.0, mv, run, jump, fire, yaw: cam.yaw, pitch: cam.pitch };
+    if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) {
+        let _ = client.send_message(CH_INPUT, bytes);
+    }
+}
+
+fn net_recv_snapshot(
+    mut commands: Commands,
+    mut client: ResMut<RenetClient>,
+    mut remap: ResMut<RemoteMap>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    local: Res<LocalNetInfo>,
+    mut self_auth: ResMut<AuthoritativeSelf>,
+) {
+    while let Some(raw) = client.receive_message(CH_SNAPSHOT) {
+        if let Ok(ServerMessage::Snapshot(snap)) = bincode::deserialize::<ServerMessage>(&raw) {
+            for p in snap.players {
+                if p.id == local.id {
+                    self_auth.pos = Some(Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
+                    self_auth.yaw = Some(p.yaw);
+                    continue;
+                }
+                let pos = Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+                if p.alive {
+                    if let Some(&ent) = remap.0.get(&p.id) {
+                        if let Some(mut ec) = commands.get_entity(ent) {
+                            ec.insert(Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(p.yaw)));
+                        }
+                    } else {
+                        let mesh = meshes.add(Cuboid::new(0.4, 1.8, 0.4));
+                    let mat = materials.add(Color::srgb(0.2, 0.9, 0.3));
+                        let ent = commands.spawn((
+                            PbrBundle { mesh, material: mat, transform: Transform::from_translation(pos), ..default() },
+                            RemoteAvatar { id: p.id },
+                        )).id();
+                        remap.0.insert(p.id, ent);
+                    }
+                } else {
+                    if let Some(ent) = remap.0.remove(&p.id) {
+                        commands.entity(ent).despawn_recursive();
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn net_recv_events(
+    mut commands: Commands,
+    mut client: ResMut<RenetClient>,
+    mut remap: ResMut<RemoteMap>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    local: Res<LocalNetInfo>,
+    mut self_auth: ResMut<AuthoritativeSelf>,
+    mut my_hp: ResMut<LocalHealth>,
+) {
+    while let Some(raw) = client.receive_message(CH_RELIABLE) {
+        if let Ok(ServerMessage::Event(ev)) = bincode::deserialize::<ServerMessage>(&raw) {
+            match ev {
+                EventMsg::Spawn { id, pos } => {
+                    let p = Vec3::new(pos[0], pos[1], pos[2]);
+                    if id == local.id {
+                        self_auth.pos = Some(p);
+                        my_hp.hp = 100;
+                    } else {
+                        if let Some(&ent) = remap.0.get(&id) {
+                            if let Some(mut ec) = commands.get_entity(ent) {
+                                ec.insert(Transform::from_translation(p));
+                            }
+                        } else {
+                            let mesh = meshes.add(Cuboid::new(0.4, 1.8, 0.4));
+                            let mat = materials.add(Color::srgb(0.2, 0.9, 0.3));
+                            let ent = commands.spawn((PbrBundle { mesh, material: mat, transform: Transform::from_translation(p), ..default() }, RemoteAvatar { id })).id();
+                            remap.0.insert(id, ent);
+                        }
+                    }
+                }
+                EventMsg::Despawn { id } => {
+                    if let Some(ent) = remap.0.remove(&id) { commands.entity(ent).despawn_recursive(); }
+                }
+                EventMsg::Hit { target_id, new_hp, by: _ } => {
+                    if target_id == local.id { my_hp.hp = new_hp; }
+                }
+                EventMsg::Death { target_id, by: _ } => {
+                    if target_id == local.id { my_hp.hp = 0; }
+                    if let Some(ent) = remap.0.remove(&target_id) { commands.entity(ent).despawn_recursive(); }
+                }
+            }
+        }
+    }
+}
+
+// 自分プレイヤーの補正（簡易リコンシリエーション）
+fn reconcile_self(
+    time: Res<Time>,
+    mut q: Query<&mut Transform, With<Player>>,
+    self_auth: Res<AuthoritativeSelf>,
+) {
+    let mut tf = if let Ok(t) = q.get_single_mut() { t } else { return };
+    if let Some(target) = self_auth.pos {
+        let diff = target - tf.translation;
+        let d = diff.length();
+        if d > 0.001 {
+            let rate = 10.0; // per second
+            let step = (rate * time.delta_seconds()).min(1.0);
+            tf.translation += diff * step;
+        }
+    }
+    if let Some(yaw) = self_auth.yaw {
+        // 軽い追従のみ（強いワープは避ける）
+        let current_yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
+        let delta = (yaw - current_yaw).atan2((yaw - current_yaw).cos());
+        let step = (6.0 * time.delta_seconds()).min(1.0);
+        tf.rotation = Quat::from_rotation_y(current_yaw + delta * step);
     }
 }
