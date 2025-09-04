@@ -103,6 +103,7 @@ fn main() {
         .insert_resource(Scores::default())
         .insert_resource(RoundState { phase: RoundPhase::Active, time_left: ROUND_TIME_SEC, end_timer: 0.0 })
         .insert_resource(SpawnPoints::default())
+        .insert_resource(JumpCounts::default())
         .insert_resource(Weapons::default())
         .insert_resource(ServerEntities::default())
         .insert_resource(MapReady(false))
