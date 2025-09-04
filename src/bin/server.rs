@@ -64,6 +64,17 @@ const WIN_KILLS: u32 = 10;
 const ROUND_TIME_SEC: f32 = 300.0; // 5 min
 const ROUND_END_DELAY_SEC: f32 = 5.0;
 
+// Weapon constants
+const MAG_SIZE: u16 = 12;
+const RELOAD_TIME: f32 = 1.6; // sec
+const FIRE_COOLDOWN: f32 = 1.0 / 7.5; // ~450 RPM
+
+#[derive(Default, Clone, Copy)]
+struct WeaponStatus { ammo: u16, cooldown: f32, reload: f32 }
+
+#[derive(Resource, Default)]
+struct Weapons(HashMap<u64, WeaponStatus>);
+
 fn main() {
     App::new()
         // ヘッドレス運用: WinitPlugin（X/Wayland依存のイベントループ）を無効化
@@ -89,6 +100,7 @@ fn main() {
         .insert_resource(Scores::default())
         .insert_resource(RoundState { phase: RoundPhase::Active, time_left: ROUND_TIME_SEC, end_timer: 0.0 })
         .insert_resource(SpawnPoints::default())
+        .insert_resource(Weapons::default())
         .insert_resource(ServerEntities::default())
         .insert_resource(MapReady(false))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
@@ -121,6 +133,7 @@ fn accept_clients(
     mut scores: ResMut<Scores>,
     round: Res<RoundState>,
     spawns: Res<SpawnPoints>,
+    mut weapons: ResMut<Weapons>,
 ) {
     while let Some(event) = server.get_event() {
         match event {
@@ -140,6 +153,8 @@ fn accept_clients(
                 let bytes = bincode::serialize(&ev).unwrap();
                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                 scores.0.entry(id).or_insert((0,0));
+                weapons.0.insert(id, WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
+                if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: MAG_SIZE, reloading: false })) { let _ = server.send_message(client_id, CH_RELIABLE, bytes); }
                 info!("client connected: {}", id);
                 // 現在のラウンド残り時間を通知
                 let ev = ServerMessage::Event(EventMsg::RoundStart { time_left_sec: round.time_left.max(0.0) as u32 });
@@ -154,6 +169,7 @@ fn accept_clients(
                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                 info!("client disconnected: {} ({:?})", id, reason);
                 scores.0.remove(&id);
+                weapons.0.remove(&id);
             }
         }
     }
@@ -240,9 +256,24 @@ fn srv_shoot_and_respawn(
     mut scores: ResMut<Scores>,
     round: Res<RoundState>,
     spawns: Res<SpawnPoints>,
+    mut weapons: ResMut<Weapons>,
 ) {
     if round.phase != RoundPhase::Active { return; }
     let dt = time_fixed.delta_seconds();
+    // tick weapon timers
+    for (id, w) in weapons.0.iter_mut() {
+        if w.cooldown > 0.0 { w.cooldown = (w.cooldown - dt).max(0.0); }
+        if w.reload > 0.0 {
+            w.reload = (w.reload - dt).max(0.0);
+            if w.reload == 0.0 {
+                w.ammo = MAG_SIZE;
+                // notify reload complete
+                if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id: *id, ammo: w.ammo, reloading: false })) {
+                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                }
+            }
+        }
+    }
     // immutable snapshot of states for safe iteration
     let snap: Vec<(u64, Vec3, bool)> = players
         .states
@@ -252,9 +283,26 @@ fn srv_shoot_and_respawn(
 
     for (id, pos, alive) in snap.iter().copied() {
         let Some(inp) = last.0.get(&id) else { continue };
+        let w = weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
         let last_seq = last_fire.0.entry(id).or_insert(0);
         if inp.fire && inp.seq != *last_seq && alive {
             *last_seq = inp.seq;
+            // Can fire?
+            if w.reload > 0.0 || w.cooldown > 0.0 { continue; }
+            if w.ammo == 0 {
+                // start reload
+                if w.reload <= 0.0 { w.reload = RELOAD_TIME; }
+                if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: w.ammo, reloading: true })) {
+                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                }
+                continue;
+            }
+            // consume ammo and set cooldown
+            w.ammo = w.ammo.saturating_sub(1);
+            w.cooldown = FIRE_COOLDOWN;
+            if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: w.ammo, reloading: false })) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
             let yaw_rot = Quat::from_rotation_y(inp.yaw);
             let pitch_rot = Quat::from_rotation_x(inp.pitch);
             let forward = yaw_rot * pitch_rot * Vec3::NEG_Z;
@@ -300,6 +348,14 @@ fn srv_shoot_and_respawn(
                             if let Ok(bytes) = bincode::serialize(&ServerMessage::Score(table)) {
                                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                             }
+                            // auto reload on kill if empty and not already reloading
+                            let ww = weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
+                            if ww.ammo == 0 && ww.reload <= 0.0 {
+                                ww.reload = RELOAD_TIME;
+                                if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: ww.ammo, reloading: true })) {
+                                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                                }
+                            }
                         }
                     }
                 }
@@ -323,6 +379,12 @@ fn srv_shoot_and_respawn(
             p.grounded = true;
             let ev = ServerMessage::Event(EventMsg::Spawn { id: pid, pos: [p.pos.x, p.pos.y, p.pos.z] });
             let bytes = bincode::serialize(&ev).unwrap();
+            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+        }
+        // reset weapon
+        let w = weapons.0.entry(pid).or_insert(WeaponStatus::default());
+        *w = WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 };
+        if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id: pid, ammo: MAG_SIZE, reloading: false })) {
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
         }
     }
@@ -359,6 +421,7 @@ fn sync_players_with_connections(
     mut ents: ResMut<ServerEntities>,
     mut scores: ResMut<Scores>,
     spawns: Res<SpawnPoints>,
+    mut weapons: ResMut<Weapons>,
 ) {
     use std::collections::HashSet;
     let current: HashSet<u64> = server.clients_id().iter().map(|c| c.raw()).collect();
@@ -379,6 +442,12 @@ fn sync_players_with_connections(
             let bytes = bincode::serialize(&ev).unwrap();
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
             scores.0.entry(id).or_insert((0,0));
+            // init weapon and notify
+            let w = WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 };
+            weapons.0.insert(id, w);
+            if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: MAG_SIZE, reloading: false })) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
             let table: Vec<ScoreEntry> = scores.0.iter().map(|(id,(k,d))| ScoreEntry{ id:*id, kills:*k as u32, deaths:*d as u32}).collect();
             if let Ok(bytes) = bincode::serialize(&ServerMessage::Score(table)) {
                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
@@ -448,7 +517,6 @@ fn round_update(
     mut round: ResMut<RoundState>,
     mut scores: ResMut<Scores>,
     mut players: ResMut<Players>,
-    ents: Res<ServerEntities>,
     mut server: ResMut<RenetServer>,
     mut respawns: ResMut<RespawnTimers>,
     spawns: Res<SpawnPoints>,

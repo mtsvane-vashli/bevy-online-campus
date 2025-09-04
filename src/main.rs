@@ -57,6 +57,9 @@ struct ScoreVisible(bool);
 #[derive(Resource, Default)]
 struct RoundUi { phase_end: Option<Timer>, time_left: f32, winner: Option<u64> }
 
+#[derive(Resource, Default)]
+struct LocalAmmo { ammo: u16, reloading: bool }
+
 #[derive(Component)]
 struct Player;
 
@@ -126,6 +129,7 @@ fn main() {
             hud_tick_hit_marker,
             hud_tick_killlog,
             scoreboard_toggle,
+            hud_update_ammo,
         ))
         .run();
 }
@@ -356,10 +360,23 @@ fn setup_hud(mut commands: Commands) {
         .with_style(Style { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Px(12.0), ..default() }),
         UiRoundText,
     ));
+
+    // 弾数（右下）
+    commands.spawn((
+        TextBundle::from_section(
+            "Ammo: 0",
+            TextStyle { font_size: 20.0, color: Color::WHITE, ..default() },
+        )
+        .with_style(Style { position_type: PositionType::Absolute, right: Val::Px(10.0), bottom: Val::Px(10.0), ..default() }),
+        UiAmmo,
+    ));
 }
 
 #[derive(Component)]
 struct UiRoundText;
+
+#[derive(Component)]
+struct UiAmmo;
 
 fn round_ui_tick(
     time: Res<Time>,
@@ -652,6 +669,17 @@ fn setup_net_client(mut commands: Commands) {
     commands.insert_resource(ScoreData::default());
     commands.insert_resource(ScoreVisible::default());
     commands.insert_resource(RoundUi::default());
+    commands.insert_resource(LocalAmmo { ammo: 0, reloading: false });
+}
+
+fn hud_update_ammo(mut q: Query<&mut Text, With<UiAmmo>>, ammo: Res<LocalAmmo>) {
+    if let Ok(mut t) = q.get_single_mut() {
+        if ammo.reloading {
+            t.sections[0].value = format!("Reloading...");
+        } else {
+            t.sections[0].value = format!("Ammo: {}", ammo.ammo);
+        }
+    }
 }
 
 fn net_send_input(
@@ -736,6 +764,7 @@ fn net_recv_events(
     mut score_data: ResMut<ScoreData>,
     board_root_q: Query<Entity, With<UiScoreboard>>,
     mut round_ui: ResMut<RoundUi>,
+    mut local_ammo: ResMut<LocalAmmo>,
 ) {
     while let Some(raw) = client.receive_message(CH_RELIABLE) {
         if let Ok(msg) = bincode::deserialize::<ServerMessage>(&raw) {
@@ -798,6 +827,12 @@ fn net_recv_events(
                 EventMsg::RoundEnd { winner_id, next_in_sec } => {
                     round_ui.winner = winner_id;
                     round_ui.phase_end = Some(Timer::from_seconds(next_in_sec as f32, TimerMode::Once));
+                }
+                EventMsg::Ammo { id, ammo, reloading } => {
+                    if id == local.id {
+                        local_ammo.ammo = ammo;
+                        local_ammo.reloading = reloading;
+                    }
                 }
             },
                 ServerMessage::Score(entries) => {

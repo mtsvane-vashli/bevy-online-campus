@@ -58,6 +58,7 @@ pub enum EventMsg {
     Death { target_id: u64, by: u64 },
     RoundStart { time_left_sec: u32 },
     RoundEnd { winner_id: Option<u64>, next_in_sec: u32 },
+    Ammo { id: u64, ammo: u16, reloading: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
