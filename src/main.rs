@@ -3,10 +3,12 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::CursorGrabMode;
+use bevy::window::WindowFocused;
 use bevy_rapier3d::prelude::*;
 use bevy_renet::RenetClientPlugin;
 use bevy_renet::transport::NetcodeClientPlugin;
 use bevy_renet::renet::RenetClient;
+use std::f32::consts::PI;
 
 #[path = "net.rs"]
 mod net;
@@ -23,6 +25,11 @@ const BULLET_LIFETIME: f32 = 2.0; // sec
 const GRAVITY: f32 = 9.81; // m/s^2
 const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
 const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
+
+#[inline]
+fn wrap_pi(a: f32) -> f32 {
+    (a + PI).rem_euclid(2.0 * PI) - PI
+}
 
 #[derive(Component)]
 struct Player;
@@ -75,6 +82,7 @@ fn main() {
         ))
         .add_systems(Startup, (setup_world, setup_ui, setup_physics, setup_net_client, setup_player))
         .add_systems(Update, (
+            handle_focus_events,
             cursor_lock_controls,
             mouse_look_system,
             keyboard_look_system,
@@ -225,7 +233,8 @@ fn mouse_look_system(
     for ev in mouse_evr.read() {
         delta += ev.delta;
     }
-    if delta == Vec2::ZERO {
+    // 微小ノイズ（トラックパッド等）を無視するデッドゾーン
+    if delta.length_squared() < 0.04 { // ~0.2px 相当
         return;
     }
 
@@ -235,7 +244,7 @@ fn mouse_look_system(
     {
         let mut cam_query = q.p1();
         let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else { return };
-        pcam.yaw -= delta.x * MOUSE_SENSITIVITY;
+        pcam.yaw = wrap_pi(pcam.yaw - delta.x * MOUSE_SENSITIVITY);
         pcam.pitch = (pcam.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-1.54, 1.54);
         new_yaw = pcam.yaw;
         new_pitch = pcam.pitch;
@@ -246,6 +255,31 @@ fn mouse_look_system(
     let mut player_query = q.p0();
     if let Ok(mut player_tf) = player_query.get_single_mut() {
         player_tf.rotation = Quat::from_rotation_y(new_yaw);
+    }
+}
+
+// フォーカス喪失時に入力をクリアして「押しっぱなし」状態を解消
+fn handle_focus_events(
+    mut focused_events: EventReader<WindowFocused>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut buttons: ResMut<ButtonInput<MouseButton>>,
+    mut mouse_evr: EventReader<MouseMotion>,
+    mut locked: ResMut<CursorLocked>,
+    mut win_q: Query<&mut Window>,
+) {
+    for ev in focused_events.read() {
+        if !ev.focused {
+            // 入力状態をリセット
+            keys.clear();
+            buttons.clear();
+            mouse_evr.clear();
+            // カーソルを解放
+            locked.0 = false;
+            if let Ok(mut w) = win_q.get_single_mut() {
+                w.cursor.visible = true;
+                w.cursor.grab_mode = CursorGrabMode::None;
+            }
+        }
     }
 }
 
@@ -268,7 +302,7 @@ fn keyboard_look_system(
         let mut cam_query = q.p1();
         let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else { return };
         // 矢印キー: 右=右回転（マウスの正方向と同じく yaw を減算）、上=上向き（pitch 減算）
-        pcam.yaw -= horiz * KEY_LOOK_SPEED * dt;
+        pcam.yaw = wrap_pi(pcam.yaw - horiz * KEY_LOOK_SPEED * dt);
         pcam.pitch = (pcam.pitch - vert * KEY_LOOK_SPEED * dt).clamp(-1.54, 1.54);
         new_yaw = pcam.yaw;
         new_pitch = pcam.pitch;
@@ -597,8 +631,8 @@ fn reconcile_self(
     if let Some(yaw) = self_auth.yaw {
         // 軽い追従のみ（強いワープは避ける）
         let current_yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
-        let delta = (yaw - current_yaw).atan2((yaw - current_yaw).cos());
+        let delta = wrap_pi(yaw - current_yaw);
         let step = (6.0 * time.delta_seconds()).min(1.0);
-        tf.rotation = Quat::from_rotation_y(current_yaw + delta * step);
+        tf.rotation = Quat::from_rotation_y(wrap_pi(current_yaw + delta * step));
     }
 }
