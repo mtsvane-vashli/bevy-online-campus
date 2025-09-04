@@ -203,6 +203,7 @@ fn srv_shoot_and_respawn(
     mut respawns: ResMut<RespawnTimers>,
     mut server: ResMut<RenetServer>,
     rapier: Res<RapierContext>,
+    ents: Res<ServerEntities>,
 ) {
     let dt = time_fixed.delta_seconds();
     // immutable snapshot of states for safe iteration
