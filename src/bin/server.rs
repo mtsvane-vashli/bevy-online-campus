@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy::winit::WinitPlugin; // headless VPS では無効化する
+use bevy::app::ScheduleRunnerPlugin; // Winit を無効化したらループ駆動を自前で
+use std::time::Duration;
 use bevy::time::Fixed;
 use bevy_rapier3d::prelude::*;
 use bevy_renet::renet::{ClientId, RenetServer};
@@ -55,6 +57,8 @@ fn main() {
                 })
                 .disable::<WinitPlugin>()
         )
+        // ヘッドレスでスケジュールを駆動するランナー（60Hz）
+        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0/60.0)))
         .add_plugins((RenetServerPlugin, NetcodeServerPlugin))
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .insert_resource(Players::default())
