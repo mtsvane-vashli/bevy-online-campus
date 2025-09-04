@@ -60,7 +60,9 @@ pub fn connection_config() -> ConnectionConfig { ConnectionConfig::default() }
 
 pub fn new_server() -> (RenetServer, NetcodeServerTransport) {
     let server = RenetServer::new(connection_config());
-    let public_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, SERVER_PORT));
+    // Bind to all interfaces, but advertise loopback for local testing
+    let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, SERVER_PORT));
+    let public_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SERVER_PORT));
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let max_clients = 32;
     let server_config = ServerConfig {
@@ -70,7 +72,7 @@ pub fn new_server() -> (RenetServer, NetcodeServerTransport) {
         public_addresses: vec![public_addr],
         authentication: ServerAuthentication::Unsecure,
     };
-    let socket = UdpSocket::bind(public_addr).expect("bind server socket");
+    let socket = UdpSocket::bind(bind_addr).expect("bind server socket");
     let transport = NetcodeServerTransport::new(server_config, socket).expect("transport");
     (server, transport)
 }

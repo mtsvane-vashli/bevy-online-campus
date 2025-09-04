@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
@@ -49,11 +49,16 @@ struct Controller {
     on_ground: bool,
 }
 
+#[derive(Resource, Default)]
+struct MapReady(pub bool);
+
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
         .insert_resource(AmbientLight { color: Color::WHITE, brightness: 300.0 })
         .insert_resource(CursorLocked(true))
+        .insert_resource(MapReady(false))
+        .insert_resource(ConnStatePrev::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Bevy FPS".into(),
@@ -68,7 +73,7 @@ fn main() {
             // デバッグ表示が欲しい場合は下を有効化
             // RapierDebugRenderPlugin::default(),
         ))
-        .add_systems(Startup, (setup_world, setup_player, setup_ui, setup_physics, setup_net_client))
+        .add_systems(Startup, (setup_world, setup_ui, setup_physics, setup_net_client, setup_player))
         .add_systems(Update, (
             cursor_lock_controls,
             mouse_look_system,
@@ -79,6 +84,7 @@ fn main() {
             shoot_system,
             bullet_move_and_despawn,
             add_mesh_colliders_for_map,
+            net_log_connection,
             net_send_input,
             net_recv_snapshot,
             net_recv_events,
@@ -279,7 +285,9 @@ fn kcc_move_system(
     keys: Res<ButtonInput<KeyCode>>,
     cam_q: Query<&PlayerCamera, With<Camera3d>>,
     mut q: Query<(&mut KinematicCharacterController, &mut Controller), With<Player>>,
+    ready: Res<MapReady>,
 ) {
+    if !ready.0 { return; }
     let (mut kcc, mut ctrl) = if let Ok(v) = q.get_single_mut() { v } else { return };
     let cam = if let Ok(v) = cam_q.get_single() { v } else { return };
 
@@ -392,14 +400,36 @@ fn bullet_move_and_despawn(
 fn add_mesh_colliders_for_map(
     mut commands: Commands,
     meshes: Res<Assets<Mesh>>,
+    mut ready: ResMut<MapReady>,
     q: Query<(Entity, &Handle<Mesh>), (Added<Handle<Mesh>>, Without<Collider>, Without<Bullet>, Without<Player>)>,
 ) {
+    let mut any_inserted = false;
     for (e, h) in &q {
         if let Some(mesh) = meshes.get(h) {
             if let Some(collider) = Collider::from_bevy_mesh(mesh, &ComputedColliderShape::TriMesh) {
                 commands.entity(e).insert((collider, RigidBody::Fixed));
+                any_inserted = true;
             }
         }
+    }
+    if any_inserted && !ready.0 {
+        ready.0 = true;
+        info!("Map colliders ready (client)");
+    }
+}
+
+#[derive(Resource, Default)]
+struct ConnStatePrev { connected: bool }
+
+fn net_log_connection(mut prev: ResMut<ConnStatePrev>, mut client: ResMut<RenetClient>) {
+    let is_conn = client.is_connected();
+    if is_conn != prev.connected {
+        if is_conn {
+            info!("Client connected to server");
+        } else {
+            info!("Client not connected; attempting handshake to 127.0.0.1:5000");
+        }
+        prev.connected = is_conn;
     }
 }
 
@@ -468,6 +498,9 @@ fn net_recv_snapshot(
 ) {
     while let Some(raw) = client.receive_message(CH_SNAPSHOT) {
         if let Ok(ServerMessage::Snapshot(snap)) = bincode::deserialize::<ServerMessage>(&raw) {
+            if snap.players.len() > 0 {
+                info!("client: snapshot players={}", snap.players.len());
+            }
             for p in snap.players {
                 if p.id == local.id {
                     self_auth.pos = Some(Vec3::new(p.pos[0], p.pos[1], p.pos[2]));

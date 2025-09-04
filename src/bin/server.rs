@@ -37,6 +37,9 @@ struct RespawnTimers(HashMap<u64, f32>);
 #[derive(Resource, Default)]
 struct ServerEntities(HashMap<u64, Entity>);
 
+#[derive(Resource, Default)]
+struct MapReady(pub bool);
+
 fn main() {
     App::new()
         // Headless asset loading; keep WindowPlugin but do not exit on close
@@ -53,10 +56,13 @@ fn main() {
         .insert_resource(LastFireSeq::default())
         .insert_resource(RespawnTimers::default())
         .insert_resource(ServerEntities::default())
+        .insert_resource(MapReady(false))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(SnapshotTimer(Timer::from_seconds(1.0/30.0, TimerMode::Repeating)))
+        .insert_resource(ServerLogTimer(Timer::from_seconds(1.0, TimerMode::Repeating)))
         .add_systems(Startup, (setup_server, setup_map))
-        .add_systems(Update, (accept_clients, add_mesh_colliders_for_map))
+        .add_systems(Update, (accept_clients, add_mesh_colliders_for_map, log_clients_count))
+        .add_systems(Update, sync_players_with_connections)
         .add_systems(FixedUpdate, recv_inputs)
         .add_systems(FixedUpdate, srv_kcc_move.before(PhysicsSet::StepSimulation))
         .add_systems(FixedUpdate, srv_kcc_post.after(PhysicsSet::Writeback))
@@ -90,6 +96,7 @@ fn accept_clients(
                     KinematicCharacterController::default(),
                 )).id();
                 ents.0.insert(id, ent);
+                info!("server: inserted player state for {} (total={})", id, players.states.len());
                 // broadcast spawn
                 let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [0.0, 10.0, 5.0] });
                 let bytes = bincode::serialize(&ev).unwrap();
@@ -133,7 +140,9 @@ fn srv_kcc_move(
     ents: Res<ServerEntities>,
     last: Res<LastInputs>,
     mut q: Query<&mut KinematicCharacterController>,
+    ready: Res<MapReady>,
 ) {
+    if !ready.0 { return; }
     let dt = time_fixed.delta_seconds();
     for (id, state) in players.states.iter_mut() {
         if !state.alive { continue; }
@@ -260,19 +269,72 @@ fn srv_shoot_and_respawn(
 fn add_mesh_colliders_for_map(
     mut commands: Commands,
     meshes: Res<Assets<Mesh>>,
+    mut ready: ResMut<MapReady>,
     q: Query<(Entity, &Handle<Mesh>), (Added<Handle<Mesh>>, Without<Collider>)>,
 ) {
+    let mut any_inserted = false;
     for (e, h) in &q {
         if let Some(mesh) = meshes.get(h) {
             if let Some(collider) = Collider::from_bevy_mesh(mesh, &ComputedColliderShape::TriMesh) {
                 commands.entity(e).insert((collider, RigidBody::Fixed));
+                any_inserted = true;
             }
+        }
+    }
+    if any_inserted && !ready.0 {
+        ready.0 = true;
+        info!("Map colliders ready (server)");
+    }
+}
+
+// Fallback: ensure Players map stays in sync with current connections.
+// This covers cases where ServerEvent is not observed in this schedule ordering.
+fn sync_players_with_connections(
+    mut commands: Commands,
+    mut server: ResMut<RenetServer>,
+    mut players: ResMut<Players>,
+    mut ents: ResMut<ServerEntities>,
+) {
+    use std::collections::HashSet;
+    let current: HashSet<u64> = server.clients_id().iter().map(|c| c.raw()).collect();
+
+    // Add missing players for newly connected clients
+    for id in current.iter().copied() {
+        if !players.states.contains_key(&id) {
+            let spawn = Vec3::new(0.0, 10.0, 5.0);
+            players.states.insert(id, PlayerState { pos: spawn, yaw: 0.0, hp: 100, alive: true, vy: 0.0, grounded: true });
+            let ent = commands.spawn((
+                TransformBundle::from_transform(Transform::from_translation(spawn)),
+                Collider::capsule_y(0.6, 0.3),
+                KinematicCharacterController::default(),
+            )).id();
+            ents.0.insert(id, ent);
+            info!("server: sync add player {} (total={})", id, players.states.len());
+            let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z] });
+            let bytes = bincode::serialize(&ev).unwrap();
+            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+        }
+    }
+
+    // Remove players for disconnected clients
+    let known: Vec<u64> = players.states.keys().copied().collect();
+    for id in known {
+        if !current.contains(&id) {
+            players.states.remove(&id);
+            if let Some(e) = ents.0.remove(&id) { commands.entity(e).despawn_recursive(); }
+            info!("server: sync remove player {} (total={})", id, players.states.len());
+            let ev = ServerMessage::Event(EventMsg::Despawn { id });
+            let bytes = bincode::serialize(&ev).unwrap();
+            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
         }
     }
 }
 
 #[derive(Resource)]
 struct SnapshotTimer(Timer);
+
+#[derive(Resource)]
+struct ServerLogTimer(Timer);
 
 fn broadcast_snapshots(
     time_fixed: Res<Time<Fixed>>,
@@ -289,5 +351,17 @@ fn broadcast_snapshots(
     let bytes = bincode::serialize(&ServerMessage::Snapshot(snap)).unwrap();
     for client_id in server.clients_id() {
         let _ = server.send_message(client_id, CH_SNAPSHOT, bytes.clone());
+    }
+}
+
+fn log_clients_count(
+    time: Res<Time>,
+    mut timer: ResMut<ServerLogTimer>,
+    server: Res<RenetServer>,
+) {
+    timer.0.tick(time.delta());
+    if timer.0.finished() {
+        let n = server.clients_id().len();
+        info!("server: clients={} ", n);
     }
 }
