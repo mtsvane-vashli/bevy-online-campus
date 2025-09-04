@@ -1,5 +1,5 @@
 use bevy_renet::renet::{ClientId, ConnectionConfig, RenetClient, RenetServer};
-use renet::transport::{ClientAuthentication, NetcodeClientTransport, NetcodeServerTransport, ServerAuthentication, ServerConfig};
+use renet::transport::{ClientAuthentication, NetcodeClientTransport, NetcodeServerTransport, ServerAuthentication, ServerConfig, ConnectToken};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::SystemTime;
@@ -74,12 +74,21 @@ pub fn new_server() -> (RenetServer, NetcodeServerTransport) {
     let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, bind_port));
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let max_clients = 32;
+    // Secure/Unsecure 切替（WAN時は SECURE=1 と NETCODE_KEY を設定）
+    let secure = matches!(env::var("SECURE").ok().as_deref(), Some("1" | "true" | "TRUE"));
+    let authentication = if secure {
+        let key = read_netcode_key().expect("SECURE=1 ですが NETCODE_KEY/NETCODE_KEY_FILE が不正です");
+        ServerAuthentication::Secure { private_key: key }
+    } else {
+        ServerAuthentication::Unsecure
+    };
+
     let server_config = ServerConfig {
         current_time,
         max_clients,
         protocol_id: PROTOCOL_ID,
         public_addresses: vec![public_addr],
-        authentication: ServerAuthentication::Unsecure,
+        authentication,
     };
     let socket = UdpSocket::bind(bind_addr).expect("bind server socket");
     if let Ok(local) = socket.local_addr() { println!("server socket bound at {} (public {})", local, server_config.public_addresses[0]); }
@@ -96,8 +105,25 @@ pub fn new_client(local_port: Option<u16>) -> (RenetClient, NetcodeClientTranspo
         .unwrap_or_else(|| SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SERVER_PORT)));
     let client_id = ClientId::from_raw(rand::random::<u64>());
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-    // Unsecure client (development)
-    let authentication = ClientAuthentication::Unsecure { server_addr, client_id: client_id.raw(), protocol_id: PROTOCOL_ID, user_data: None };
+    // Secure/Unsecure 切替（WAN時は SECURE=1 と NETCODE_KEY を設定）
+    let secure = matches!(env::var("SECURE").ok().as_deref(), Some("1" | "true" | "TRUE"));
+    let authentication = if secure {
+        let key = read_netcode_key().expect("SECURE=1 ですが NETCODE_KEY/NETCODE_KEY_FILE が不正です");
+        let token = ConnectToken::generate(
+            current_time,
+            PROTOCOL_ID,
+            120,                         // token expire seconds
+            client_id.raw(),             // client id
+            15,                          // handshake timeout seconds
+            vec![server_addr],           // server addresses
+            None,                        // optional user data
+            &key,
+        ).expect("generate connect token");
+        ClientAuthentication::Secure { connect_token: token }
+    } else {
+        // Unsecure client (development)
+        ClientAuthentication::Unsecure { server_addr, client_id: client_id.raw(), protocol_id: PROTOCOL_ID, user_data: None }
+    };
     // 環境変数 CLIENT_PORT があればそのポートでバインド（デバッグ用）
     let env_port = env::var("CLIENT_PORT").ok().and_then(|s| s.parse::<u16>().ok());
     let lp = local_port.or(env_port).unwrap_or(0);
@@ -106,4 +132,37 @@ pub fn new_client(local_port: Option<u16>) -> (RenetClient, NetcodeClientTranspo
     if let Ok(local) = socket.local_addr() { println!("client socket bound at {} (client_id={})", local, client_id.raw()); }
     let transport = NetcodeClientTransport::new(current_time, authentication, socket).expect("client transport");
     (client, transport, client_id)
+}
+
+// --- helpers ---
+
+fn read_netcode_key() -> Result<[u8; 32], String> {
+    // 優先: NETCODE_KEY（HEX 64文字 or 0x...付き）
+    if let Ok(s) = env::var("NETCODE_KEY") {
+        return parse_hex_key(&s);
+    }
+    // 次点: NETCODE_KEY_FILE（バイナリ32バイト or HEX文字列）
+    if let Ok(path) = env::var("NETCODE_KEY_FILE") {
+        let data = std::fs::read(&path).map_err(|e| format!("read NETCODE_KEY_FILE: {}", e))?;
+        if data.len() == 32 {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&data);
+            return Ok(k);
+        }
+        let s = String::from_utf8_lossy(&data).trim().to_string();
+        return parse_hex_key(&s);
+    }
+    Err("NETCODE_KEY か NETCODE_KEY_FILE を指定してください".into())
+}
+
+fn parse_hex_key(s: &str) -> Result<[u8; 32], String> {
+    let s = s.trim();
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    if s.len() != 64 { return Err("HEXキーは64桁で指定してください".into()); }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let b = u8::from_str_radix(&s[i*2..i*2+2], 16).map_err(|_| "HEX変換に失敗しました")?;
+        out[i] = b;
+    }
+    Ok(out)
 }
