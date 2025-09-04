@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use bevy::prelude::*;
+use bevy::winit::WinitPlugin; // headless VPS では無効化する
 use bevy::time::Fixed;
 use bevy_rapier3d::prelude::*;
 use bevy_renet::renet::{ClientId, RenetServer};
@@ -42,13 +43,18 @@ struct MapReady(pub bool);
 
 fn main() {
     App::new()
-        // Headless asset loading; keep WindowPlugin but do not exit on close
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: None,
-            exit_condition: bevy::window::ExitCondition::DontExit,
-            close_when_requested: false,
-            ..default()
-        }))
+        // ヘッドレス運用: WinitPlugin（X/Wayland依存のイベントループ）を無効化
+        // WindowPlugin は primary_window=None で維持（Asset や Render 依存を壊さない）
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    close_when_requested: false,
+                    ..default()
+                })
+                .disable::<WinitPlugin>()
+        )
         .add_plugins((RenetServerPlugin, NetcodeServerPlugin))
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .insert_resource(Players::default())
