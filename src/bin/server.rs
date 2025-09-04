@@ -239,6 +239,7 @@ fn srv_shoot_and_respawn(
     ents: Res<ServerEntities>,
     mut scores: ResMut<Scores>,
     round: Res<RoundState>,
+    spawns: Res<SpawnPoints>,
 ) {
     if round.phase != RoundPhase::Active { return; }
     let dt = time_fixed.delta_seconds();
@@ -313,10 +314,11 @@ fn srv_shoot_and_respawn(
     }
     for pid in to_spawn {
         respawns.0.remove(&pid);
+        let spawn = choose_spawn_point(&spawns, &players);
         if let Some(p) = players.states.get_mut(&pid) {
             p.alive = true;
             p.hp = 100;
-            p.pos = Vec3::new(0.0, 10.0, 5.0);
+            p.pos = spawn;
             p.vy = 0.0;
             p.grounded = true;
             let ev = ServerMessage::Event(EventMsg::Spawn { id: pid, pos: [p.pos.x, p.pos.y, p.pos.z] });
@@ -449,6 +451,7 @@ fn round_update(
     ents: Res<ServerEntities>,
     mut server: ResMut<RenetServer>,
     mut respawns: ResMut<RespawnTimers>,
+    spawns: Res<SpawnPoints>,
 ) {
     let dt = time_fixed.delta_seconds();
     match round.phase {
@@ -476,16 +479,20 @@ fn round_update(
                 // scores は accept/sync で再周知されるため、ここでクリア
                 // ただし現状の実装ではスコア配布のために空配列を通知
                 // プレイヤーを全員リスポーン
-                for (id, state) in players.states.iter_mut() {
-                    state.alive = true;
-                    state.hp = 100;
-                    state.pos = Vec3::new(0.0, 10.0, 5.0);
-                    state.vy = 0.0;
-                    state.grounded = true;
-                    // 送信
-                    let ev = ServerMessage::Event(EventMsg::Spawn { id: *id, pos: [state.pos.x, state.pos.y, state.pos.z] });
-                    if let Ok(bytes) = bincode::serialize(&ev) {
-                        for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                let ids: Vec<u64> = players.states.keys().copied().collect();
+                for id in ids {
+                    let spawn = choose_spawn_point(&spawns, &players);
+                    if let Some(state) = players.states.get_mut(&id) {
+                        state.alive = true;
+                        state.hp = 100;
+                        state.pos = spawn;
+                        state.vy = 0.0;
+                        state.grounded = true;
+                        // 送信
+                        let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [state.pos.x, state.pos.y, state.pos.z] });
+                        if let Ok(bytes) = bincode::serialize(&ev) {
+                            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                        }
                     }
                 }
                 respawns.0.clear();

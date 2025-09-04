@@ -9,6 +9,7 @@ use bevy_renet::RenetClientPlugin;
 use bevy_renet::transport::NetcodeClientPlugin;
 use bevy_renet::renet::RenetClient;
 use std::f32::consts::PI;
+use std::time::Duration;
 
 #[path = "net.rs"]
 mod net;
@@ -30,6 +31,31 @@ const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
 fn wrap_pi(a: f32) -> f32 {
     (a + PI).rem_euclid(2.0 * PI) - PI
 }
+
+// ===== HUD Components =====
+#[derive(Component)]
+struct UiHp;
+
+#[derive(Component)]
+struct UiHitMarker { timer: Timer }
+
+#[derive(Component)]
+struct UiKillLog;
+
+#[derive(Component)]
+struct UiKillEntry { timer: Timer }
+
+#[derive(Component)]
+struct UiScoreboard;
+
+#[derive(Resource, Default)]
+struct ScoreData(Vec<(u64, u32, u32)>); // (id, kills, deaths)
+
+#[derive(Resource, Default)]
+struct ScoreVisible(bool);
+
+#[derive(Resource, Default)]
+struct RoundUi { phase_end: Option<Timer>, time_left: f32, winner: Option<u64> }
 
 #[derive(Component)]
 struct Player;
@@ -80,7 +106,7 @@ fn main() {
             // デバッグ表示が欲しい場合は下を有効化
             // RapierDebugRenderPlugin::default(),
         ))
-        .add_systems(Startup, (setup_world, setup_ui, setup_physics, setup_net_client, setup_player))
+        .add_systems(Startup, (setup_world, setup_ui, setup_physics, setup_net_client, setup_player, setup_hud))
         .add_systems(Update, (
             handle_focus_events,
             cursor_lock_controls,
@@ -96,6 +122,10 @@ fn main() {
             net_send_input,
             net_recv_snapshot,
             net_recv_events,
+            hud_update_hp,
+            hud_tick_hit_marker,
+            hud_tick_killlog,
+            scoreboard_toggle,
         ))
         .run();
 }
@@ -178,7 +208,7 @@ fn setup_ui(mut commands: Commands) {
         ..default()
     }).with_children(|parent| {
         parent.spawn(TextBundle::from_section(
-            "＋",
+            "+",
             TextStyle {
                 font_size: 18.0,
                 color: Color::srgb(1.0, 1.0, 1.0),
@@ -255,6 +285,98 @@ fn mouse_look_system(
     let mut player_query = q.p0();
     if let Ok(mut player_tf) = player_query.get_single_mut() {
         player_tf.rotation = Quat::from_rotation_y(new_yaw);
+    }
+}
+
+fn setup_hud(mut commands: Commands) {
+    // HP表示（左下）
+    commands.spawn((
+        TextBundle::from_section(
+            "HP: 100",
+            TextStyle { font_size: 28.0, color: Color::BLACK, ..default() },
+        )
+        .with_style(Style { position_type: PositionType::Absolute, left: Val::Px(10.0), bottom: Val::Px(10.0), ..default() }),
+        UiHp,
+    ));
+
+    // ヒットマーカー（中心に薄いX、初期は透過）
+    commands.spawn((
+        TextBundle {
+            text: Text::from_section(
+                "x",
+                TextStyle { font_size: 28.0, color: Color::srgba(1.0, 0.2, 0.2, 0.0), ..default() },
+            ),
+            style: Style { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), ..default() },
+            ..default()
+        },
+        UiHitMarker { timer: Timer::from_seconds(0.0, TimerMode::Once) },
+    ));
+
+    // キルログ（右上、縦積み）
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                position_type: PositionType::Absolute,
+                right: Val::Px(10.0),
+                top: Val::Px(10.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            background_color: BackgroundColor(Color::NONE),
+            ..default()
+        },
+        UiKillLog,
+    ));
+
+    // スコアボード（中央上、非表示）
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Px(40.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            background_color: BackgroundColor(Color::NONE),
+            visibility: Visibility::Hidden,
+            ..default()
+        },
+        UiScoreboard,
+    ));
+
+    // ラウンド表示（中央上部、常時）
+    commands.spawn((
+        TextBundle::from_section(
+            "",
+            TextStyle { font_size: 20.0, color: Color::WHITE, ..default() },
+        )
+        .with_style(Style { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Px(12.0), ..default() }),
+        UiRoundText,
+    ));
+}
+
+#[derive(Component)]
+struct UiRoundText;
+
+fn round_ui_tick(
+    time: Res<Time>,
+    mut ui: ResMut<RoundUi>,
+    mut q: Query<&mut Text, With<UiRoundText>>,
+) {
+    if let Ok(mut t) = q.get_single_mut() {
+        if let Some(timer) = ui.phase_end.as_mut() {
+            timer.tick(time.delta());
+            let remain = (timer.duration().as_secs_f32() - timer.elapsed_secs()).max(0.0);
+            t.sections[0].value = format!("Round End{}  Next: {:.0}s", ui.winner.map(|w| format!("  Winner {}", w)).unwrap_or_default(), remain);
+        } else {
+            ui.time_left = (ui.time_left - time.delta_seconds()).max(0.0);
+            let m = (ui.time_left as i32 / 60).max(0);
+            let s = (ui.time_left as i32 % 60).max(0);
+            t.sections[0].value = format!("Time {:02}:{:02}", m, s);
+        }
     }
 }
 
@@ -430,6 +552,37 @@ fn bullet_move_and_despawn(
     }
 }
 
+// ===== HUD Systems =====
+fn hud_update_hp(mut q: Query<&mut Text, With<UiHp>>, hp: Res<LocalHealth>) {
+    if let Ok(mut t) = q.get_single_mut() {
+        t.sections[0].value = format!("HP: {}", hp.hp);
+        t.sections[0].style.color = Color::BLACK;
+    }
+}
+
+fn hud_tick_hit_marker(time: Res<Time>, mut q: Query<(&mut UiHitMarker, &mut Text)>) {
+    if let Ok((mut hm, mut text)) = q.get_single_mut() {
+        hm.timer.tick(time.delta());
+        let d = hm.timer.duration().as_secs_f32();
+        let alpha = if d <= 0.0 { 0.0 } else { (d - hm.timer.elapsed_secs()).max(0.0) / d };
+        text.sections[0].style.color = Color::srgba(1.0, 0.2, 0.2, alpha.clamp(0.0, 1.0));
+    }
+}
+
+fn hud_tick_killlog(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut UiKillEntry, &mut Text)>,
+) {
+    for (e, mut entry, mut text) in &mut q {
+        entry.timer.tick(time.delta());
+        let d = entry.timer.duration().as_secs_f32().max(0.0001);
+        let remain = (d - entry.timer.elapsed_secs()).max(0.0) / d;
+        text.sections[0].style.color = Color::srgba(1.0, 1.0, 1.0, remain.clamp(0.0, 1.0));
+        if entry.timer.finished() { commands.entity(e).despawn_recursive(); }
+    }
+}
+
 // GLBのメッシュに静的コライダーを自動付与
 fn add_mesh_colliders_for_map(
     mut commands: Commands,
@@ -496,6 +649,9 @@ fn setup_net_client(mut commands: Commands) {
     commands.insert_resource(InputSeq::default());
     commands.insert_resource(AuthoritativeSelf::default());
     commands.insert_resource(LocalHealth { hp: 100 });
+    commands.insert_resource(ScoreData::default());
+    commands.insert_resource(ScoreVisible::default());
+    commands.insert_resource(RoundUi::default());
 }
 
 fn net_send_input(
@@ -575,11 +731,17 @@ fn net_recv_events(
     local: Res<LocalNetInfo>,
     mut self_auth: ResMut<AuthoritativeSelf>,
     mut my_hp: ResMut<LocalHealth>,
+    mut hit_q: Query<&mut UiHitMarker>,
+    log_root_q: Query<Entity, With<UiKillLog>>,
+    mut score_data: ResMut<ScoreData>,
+    board_root_q: Query<Entity, With<UiScoreboard>>,
+    mut round_ui: ResMut<RoundUi>,
 ) {
     while let Some(raw) = client.receive_message(CH_RELIABLE) {
-        if let Ok(ServerMessage::Event(ev)) = bincode::deserialize::<ServerMessage>(&raw) {
-            match ev {
-                EventMsg::Spawn { id, pos } => {
+        if let Ok(msg) = bincode::deserialize::<ServerMessage>(&raw) {
+            match msg {
+                ServerMessage::Event(ev) => match ev {
+                    EventMsg::Spawn { id, pos } => {
                     let p = Vec3::new(pos[0], pos[1], pos[2]);
                     if id == local.id {
                         self_auth.pos = Some(p);
@@ -600,13 +762,66 @@ fn net_recv_events(
                 EventMsg::Despawn { id } => {
                     if let Some(ent) = remap.0.remove(&id) { commands.entity(ent).despawn_recursive(); }
                 }
-                EventMsg::Hit { target_id, new_hp, by: _ } => {
+                EventMsg::Hit { target_id, new_hp, by } => {
                     if target_id == local.id { my_hp.hp = new_hp; }
+                    if by == local.id {
+                        if let Ok(mut hm) = hit_q.get_single_mut() {
+                            hm.timer.set_duration(Duration::from_secs_f32(0.15));
+                            hm.timer.reset();
+                        }
+                    }
                 }
-                EventMsg::Death { target_id, by: _ } => {
+                EventMsg::Death { target_id, by } => {
                     if target_id == local.id { my_hp.hp = 0; }
                     if let Some(ent) = remap.0.remove(&target_id) { commands.entity(ent).despawn_recursive(); }
+                    // キルログ追加
+                    let killer = if by == local.id { "You".to_string() } else { format!("{}", by) };
+                    let victim = if target_id == local.id { "You".to_string() } else { format!("{}", target_id) };
+                    let line = format!("{} → {}", killer, victim);
+                    if let Ok(root) = log_root_q.get_single() {
+                        commands.entity(root).with_children(|p| {
+                            p.spawn((
+                                TextBundle::from_section(
+                                    line,
+                                    TextStyle { font_size: 16.0, color: Color::srgba(1.0, 1.0, 1.0, 0.95), ..default() },
+                                ),
+                                UiKillEntry { timer: Timer::from_seconds(3.0, TimerMode::Once) },
+                            ));
+                        });
+                    }
                 }
+                EventMsg::RoundStart { time_left_sec } => {
+                    round_ui.phase_end = None;
+                    round_ui.time_left = time_left_sec as f32;
+                    round_ui.winner = None;
+                }
+                EventMsg::RoundEnd { winner_id, next_in_sec } => {
+                    round_ui.winner = winner_id;
+                    round_ui.phase_end = Some(Timer::from_seconds(next_in_sec as f32, TimerMode::Once));
+                }
+            },
+                ServerMessage::Score(entries) => {
+                    // 更新して、スコアボードUIを再構築
+                    score_data.0 = entries.into_iter().map(|e| (e.id, e.kills, e.deaths)).collect();
+                    if let Ok(root) = board_root_q.get_single() {
+                        if let Some(mut ec) = commands.get_entity(root) { ec.despawn_descendants(); }
+                        commands.entity(root).with_children(|p| {
+                            p.spawn(TextBundle::from_section(
+                                format!("{:>6}  {:>5} {:>6}", "ID", "K", "D"),
+                                TextStyle { font_size: 18.0, color: Color::WHITE, ..default() },
+                            ));
+                            let mut rows = score_data.0.clone();
+                            rows.sort_by_key(|e| (-(e.1 as i32), e.2 as i32));
+                            for (id, k, d) in rows {
+                                p.spawn(TextBundle::from_section(
+                                    format!("{:>6}  {:>5} {:>6}", id, k, d),
+                                    TextStyle { font_size: 16.0, color: Color::WHITE, ..default() },
+                                ));
+                            }
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -634,5 +849,19 @@ fn reconcile_self(
         let delta = wrap_pi(yaw - current_yaw);
         let step = (6.0 * time.delta_seconds()).min(1.0);
         tf.rotation = Quat::from_rotation_y(wrap_pi(current_yaw + delta * step));
+    }
+}
+
+fn scoreboard_toggle(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut q: Query<&mut Visibility, With<UiScoreboard>>,
+) {
+    if keys.just_pressed(KeyCode::Tab) {
+        if let Ok(mut v) = q.get_single_mut() {
+            *v = match *v {
+                Visibility::Hidden => Visibility::Visible,
+                _ => Visibility::Hidden,
+            };
+        }
     }
 }
