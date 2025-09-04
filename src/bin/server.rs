@@ -4,6 +4,7 @@ use bevy::winit::WinitPlugin; // headless VPS では無効化する
 use bevy::app::ScheduleRunnerPlugin; // Winit を無効化したらループ駆動を自前で
 use std::time::Duration;
 use bevy::time::Fixed;
+use bevy::prelude::Name;
 use bevy_rapier3d::prelude::*;
 use bevy_renet::renet::{ClientId, RenetServer};
 use bevy_renet::transport::NetcodeServerPlugin;
@@ -46,6 +47,23 @@ struct MapReady(pub bool);
 #[derive(Resource, Default)]
 struct Scores(HashMap<u64, (u32, u32)>); // id -> (kills, deaths)
 
+#[derive(Resource, Default)]
+struct SpawnPoints(pub Vec<Vec3>);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoundPhase { Active, Ending }
+
+#[derive(Resource)]
+struct RoundState {
+    phase: RoundPhase,
+    time_left: f32,
+    end_timer: f32,
+}
+
+const WIN_KILLS: u32 = 10;
+const ROUND_TIME_SEC: f32 = 300.0; // 5 min
+const ROUND_END_DELAY_SEC: f32 = 5.0;
+
 fn main() {
     App::new()
         // ヘッドレス運用: WinitPlugin（X/Wayland依存のイベントループ）を無効化
@@ -69,19 +87,22 @@ fn main() {
         .insert_resource(LastFireSeq::default())
         .insert_resource(RespawnTimers::default())
         .insert_resource(Scores::default())
+        .insert_resource(RoundState { phase: RoundPhase::Active, time_left: ROUND_TIME_SEC, end_timer: 0.0 })
+        .insert_resource(SpawnPoints::default())
         .insert_resource(ServerEntities::default())
         .insert_resource(MapReady(false))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(SnapshotTimer(Timer::from_seconds(1.0/30.0, TimerMode::Repeating)))
         .insert_resource(ServerLogTimer(Timer::from_seconds(1.0, TimerMode::Repeating)))
         .add_systems(Startup, (setup_server, setup_map))
-        .add_systems(Update, (accept_clients, add_mesh_colliders_for_map, log_clients_count))
+        .add_systems(Update, (accept_clients, add_mesh_colliders_for_map, collect_spawn_points_from_map, log_clients_count))
         .add_systems(Update, sync_players_with_connections)
         .add_systems(FixedUpdate, recv_inputs)
         .add_systems(FixedUpdate, srv_kcc_move.before(PhysicsSet::StepSimulation))
         .add_systems(FixedUpdate, srv_kcc_post.after(PhysicsSet::Writeback))
         .add_systems(FixedUpdate, srv_shoot_and_respawn.after(srv_kcc_post))
         .add_systems(FixedUpdate, broadcast_snapshots.after(srv_shoot_and_respawn))
+        .add_systems(FixedUpdate, round_update.after(broadcast_snapshots))
         .run();
 }
 
@@ -98,12 +119,14 @@ fn accept_clients(
     mut players: ResMut<Players>,
     mut ents: ResMut<ServerEntities>,
     mut scores: ResMut<Scores>,
+    round: Res<RoundState>,
+    spawns: Res<SpawnPoints>,
 ) {
     while let Some(event) = server.get_event() {
         match event {
             bevy_renet::renet::ServerEvent::ClientConnected { client_id } => {
                 let id = client_id.raw();
-                let spawn = Vec3::new(0.0, 10.0, 5.0);
+                let spawn = choose_spawn_point(&spawns, &players);
                 players.states.insert(id, PlayerState { pos: spawn, yaw: 0.0, hp: 100, alive: true, vy: 0.0, grounded: true });
                 let ent = commands.spawn((
                     TransformBundle::from_transform(Transform::from_translation(spawn)),
@@ -113,11 +136,14 @@ fn accept_clients(
                 ents.0.insert(id, ent);
                 info!("server: inserted player state for {} (total={})", id, players.states.len());
                 // broadcast spawn
-                let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [0.0, 10.0, 5.0] });
+                let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z] });
                 let bytes = bincode::serialize(&ev).unwrap();
                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                 scores.0.entry(id).or_insert((0,0));
                 info!("client connected: {}", id);
+                // 現在のラウンド残り時間を通知
+                let ev = ServerMessage::Event(EventMsg::RoundStart { time_left_sec: round.time_left.max(0.0) as u32 });
+                if let Ok(bytes) = bincode::serialize(&ev) { let _ = server.send_message(client_id, CH_RELIABLE, bytes); }
             }
             bevy_renet::renet::ServerEvent::ClientDisconnected { client_id, reason } => {
                 let id = client_id.raw();
@@ -212,7 +238,9 @@ fn srv_shoot_and_respawn(
     rapier: Res<RapierContext>,
     ents: Res<ServerEntities>,
     mut scores: ResMut<Scores>,
+    round: Res<RoundState>,
 ) {
+    if round.phase != RoundPhase::Active { return; }
     let dt = time_fixed.delta_seconds();
     // immutable snapshot of states for safe iteration
     let snap: Vec<(u64, Vec3, bool)> = players
@@ -328,6 +356,7 @@ fn sync_players_with_connections(
     mut players: ResMut<Players>,
     mut ents: ResMut<ServerEntities>,
     mut scores: ResMut<Scores>,
+    spawns: Res<SpawnPoints>,
 ) {
     use std::collections::HashSet;
     let current: HashSet<u64> = server.clients_id().iter().map(|c| c.raw()).collect();
@@ -335,7 +364,7 @@ fn sync_players_with_connections(
     // Add missing players for newly connected clients
     for id in current.iter().copied() {
         if !players.states.contains_key(&id) {
-            let spawn = Vec3::new(0.0, 10.0, 5.0);
+            let spawn = choose_spawn_point(&spawns, &players);
             players.states.insert(id, PlayerState { pos: spawn, yaw: 0.0, hp: 100, alive: true, vy: 0.0, grounded: true });
             let ent = commands.spawn((
                 TransformBundle::from_transform(Transform::from_translation(spawn)),
@@ -366,6 +395,115 @@ fn sync_players_with_connections(
             let bytes = bincode::serialize(&ev).unwrap();
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
             scores.0.remove(&id);
+        }
+    }
+}
+
+fn collect_spawn_points_from_map(
+    mut spawns: ResMut<SpawnPoints>,
+    q: Query<(&GlobalTransform, Option<&Name>), Added<GlobalTransform>>,
+) {
+    let mut added = 0;
+    for (gt, name) in &q {
+        if let Some(n) = name {
+            let s = n.as_str();
+            if s.starts_with("spawn") || s.starts_with("Spawn") || s.starts_with("SPAWN") || s.starts_with("spawn_") {
+                let p = gt.translation();
+                spawns.0.push(p);
+                added += 1;
+            }
+        }
+    }
+    if added > 0 {
+        info!("Map spawn points collected: +{} (total={})", added, spawns.0.len());
+    }
+}
+
+fn choose_spawn_point(spawns: &SpawnPoints, players: &Players) -> Vec3 {
+    if spawns.0.is_empty() {
+        return Vec3::new(0.0, 10.0, 5.0);
+    }
+    let mut best_pos = spawns.0[0];
+    let mut best_score = f32::MIN;
+    for &p in &spawns.0 {
+        let mut mind = f32::INFINITY;
+        for (_id, s) in players.states.iter() {
+            if s.alive {
+                let d = s.pos.distance(p);
+                if d < mind { mind = d; }
+            }
+        }
+        if mind > best_score {
+            best_score = mind;
+            best_pos = p;
+        }
+    }
+    best_pos
+}
+
+fn round_update(
+    time_fixed: Res<Time<Fixed>>,
+    mut round: ResMut<RoundState>,
+    mut scores: ResMut<Scores>,
+    mut players: ResMut<Players>,
+    ents: Res<ServerEntities>,
+    mut server: ResMut<RenetServer>,
+    mut respawns: ResMut<RespawnTimers>,
+) {
+    let dt = time_fixed.delta_seconds();
+    match round.phase {
+        RoundPhase::Active => {
+            round.time_left -= dt;
+            // 勝利条件チェック
+            let mut winner: Option<u64> = None;
+            for (id, (k, _d)) in scores.0.iter() {
+                if *k >= WIN_KILLS { winner = Some(*id); break; }
+            }
+            if winner.is_some() || round.time_left <= 0.0 {
+                // 終了を通知
+                let ev = ServerMessage::Event(EventMsg::RoundEnd { winner_id: winner, next_in_sec: ROUND_END_DELAY_SEC as u32 });
+                if let Ok(bytes) = bincode::serialize(&ev) {
+                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                }
+                round.phase = RoundPhase::Ending;
+                round.end_timer = ROUND_END_DELAY_SEC;
+            }
+        }
+        RoundPhase::Ending => {
+            round.end_timer -= dt;
+            if round.end_timer <= 0.0 {
+                // リセット: スコア、プレイヤー状態、リスポーン
+                // scores は accept/sync で再周知されるため、ここでクリア
+                // ただし現状の実装ではスコア配布のために空配列を通知
+                // プレイヤーを全員リスポーン
+                for (id, state) in players.states.iter_mut() {
+                    state.alive = true;
+                    state.hp = 100;
+                    state.pos = Vec3::new(0.0, 10.0, 5.0);
+                    state.vy = 0.0;
+                    state.grounded = true;
+                    // 送信
+                    let ev = ServerMessage::Event(EventMsg::Spawn { id: *id, pos: [state.pos.x, state.pos.y, state.pos.z] });
+                    if let Ok(bytes) = bincode::serialize(&ev) {
+                        for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                    }
+                }
+                respawns.0.clear();
+                // スコアをゼロクリア
+                // 既存のキーを維持して0にする
+                for (_id, kd) in scores.0.iter_mut() { *kd = (0,0); }
+                let table: Vec<ScoreEntry> = scores.0.iter().map(|(id,(k,d))| ScoreEntry{ id:*id, kills:*k as u32, deaths:*d as u32}).collect();
+                if let Ok(bytes) = bincode::serialize(&ServerMessage::Score(table)) {
+                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                }
+                // ラウンド開始通知
+                round.phase = RoundPhase::Active;
+                round.time_left = ROUND_TIME_SEC;
+                let ev = ServerMessage::Event(EventMsg::RoundStart { time_left_sec: round.time_left as u32 });
+                if let Ok(bytes) = bincode::serialize(&ev) {
+                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                }
+            }
         }
     }
 }
