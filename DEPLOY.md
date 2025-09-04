@@ -35,3 +35,22 @@ WAN 運用のメモ
     - `NETCODE_KEY=<64桁HEX>` もしくは `NETCODE_KEY_FILE=<鍵ファイルパス>`（バイナリ32B or HEX文字列）
   - 例: `SECURE=1 NETCODE_KEY=0x001122...ffeedd SERVER_ADDR=0.0.0.0:5000 ./server`
   - クライアントも同じ鍵を設定: `SECURE=1 NETCODE_KEY=... SERVER_ADDR=example.com:5000 ./bevy-online-campus`
+Linux 用スクリプト・常駐化
+- サーバー起動（bash）:
+  - 権限付与: `chmod +x ./run-server.sh`
+  - 例: `./run-server.sh --address 0.0.0.0 --port 5000 --log warn --secure --key 0x<64HEX>`
+  - キーファイル利用: `./run-server.sh --secure --key-file /opt/bevy/key.hex`
+  - 既定で `WGPU_BACKEND=vk` と `WGPU_ALLOW_SOFTWARE=1` を設定（GPUなしVPS向け）
+- クライアント起動（bash）:
+  - 権限付与: `chmod +x ./run-client.sh`
+  - 例: `./run-client.sh --server <IPまたはFQDN>:5000 --low-gfx --no-vsync --log warn`
+  - Secure利用時: `./run-client.sh --server <IP>:5000 --secure --key 0x<64HEX>`
+
+systemd 常駐（Linux）
+- テンプレート: `systemd/bevy-server.service`
+- 手順:
+  1) `/opt/bevy` に `server` と `assets/` を配置（必要なら `key.hex` も）
+  2) `sudo cp systemd/bevy-server.service /etc/systemd/system/`
+  3) 必要に応じて `/etc/systemd/system/bevy-server.service` 内の Environment を編集
+  4) `sudo systemctl daemon-reload && sudo systemctl enable --now bevy-server`
+  5) ログ追尾: `journalctl -u bevy-server -f`

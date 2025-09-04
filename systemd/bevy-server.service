@@ -1,0 +1,22 @@
+[Unit]
+Description=Bevy Online Campus Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bevy
+Environment=SERVER_ADDR=0.0.0.0:5000
+Environment=RUST_LOG=warn
+Environment=WGPU_BACKEND=vk
+Environment=WGPU_ALLOW_SOFTWARE=1
+# Enable Secure auth (uncomment and set one of the following):
+# Environment=SECURE=1
+# Environment=NETCODE_KEY=0x<64HEX>
+# Environment=NETCODE_KEY_FILE=/opt/bevy/key.hex
+ExecStart=/opt/bevy/server
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+
