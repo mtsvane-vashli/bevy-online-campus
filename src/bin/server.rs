@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use bevy::winit::WinitPlugin; // headless VPS では無効化する
 use bevy::app::ScheduleRunnerPlugin; // Winit を無効化したらループ駆動を自前で
 use std::time::Duration;
+use std::env;
 use bevy::time::Fixed;
 use bevy::prelude::Name;
 use bevy_rapier3d::prelude::*;
@@ -491,6 +492,10 @@ fn collect_spawn_points_from_map(
 }
 
 fn choose_spawn_point(spawns: &SpawnPoints, players: &Players) -> Vec3 {
+    // 環境変数でスポーン点機能を一時無効化（デバッグ用）
+    if matches!(env::var("USE_SPAWN_POINTS").ok().as_deref(), Some("0" | "false" | "False")) {
+        return Vec3::new(0.0, 10.0, 5.0);
+    }
     if spawns.0.is_empty() {
         return Vec3::new(0.0, 10.0, 5.0);
     }

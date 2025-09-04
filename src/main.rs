@@ -214,8 +214,8 @@ fn setup_ui(mut commands: Commands) {
         parent.spawn(TextBundle::from_section(
             "+",
             TextStyle {
-                font_size: 18.0,
-                color: Color::srgb(1.0, 1.0, 1.0),
+                font_size: 28.0,
+                color: Color::BLACK,
                 ..default()
             },
         ));
@@ -297,7 +297,7 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
             "HP: 100",
-            TextStyle { font_size: 28.0, color: Color::BLACK, ..default() },
+            TextStyle { font_size: 36.0, color: Color::BLACK, ..default() },
         )
         .with_style(Style { position_type: PositionType::Absolute, left: Val::Px(10.0), bottom: Val::Px(10.0), ..default() }),
         UiHp,
@@ -307,8 +307,8 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle {
             text: Text::from_section(
-                "x",
-                TextStyle { font_size: 28.0, color: Color::srgba(1.0, 0.2, 0.2, 0.0), ..default() },
+                "✕",
+                TextStyle { font_size: 40.0, color: Color::srgba(0.0, 0.0, 0.0, 0.0), ..default() },
             ),
             style: Style { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), ..default() },
             ..default()
@@ -355,7 +355,7 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
             "",
-            TextStyle { font_size: 20.0, color: Color::WHITE, ..default() },
+            TextStyle { font_size: 32.0, color: Color::BLACK, ..default() },
         )
         .with_style(Style { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Px(12.0), ..default() }),
         UiRoundText,
@@ -365,7 +365,7 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
             "Ammo: 0",
-            TextStyle { font_size: 20.0, color: Color::WHITE, ..default() },
+            TextStyle { font_size: 28.0, color: Color::BLACK, ..default() },
         )
         .with_style(Style { position_type: PositionType::Absolute, right: Val::Px(10.0), bottom: Val::Px(10.0), ..default() }),
         UiAmmo,
@@ -514,8 +514,13 @@ fn shoot_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    ammo: Res<LocalAmmo>,
 ) {
     if !(buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF)) {
+        return;
+    }
+    // リロード中や弾0のときは見た目の弾は出さない（サーバー権威の判定は継続）
+    if ammo.reloading || ammo.ammo == 0 {
         return;
     }
     let cam_g = if let Ok(v) = cam_global_q.get_single() { v } else { return };
@@ -582,7 +587,7 @@ fn hud_tick_hit_marker(time: Res<Time>, mut q: Query<(&mut UiHitMarker, &mut Tex
         hm.timer.tick(time.delta());
         let d = hm.timer.duration().as_secs_f32();
         let alpha = if d <= 0.0 { 0.0 } else { (d - hm.timer.elapsed_secs()).max(0.0) / d };
-        text.sections[0].style.color = Color::srgba(1.0, 0.2, 0.2, alpha.clamp(0.0, 1.0));
+        text.sections[0].style.color = Color::srgba(0.0, 0.0, 0.0, alpha.clamp(0.0, 1.0));
     }
 }
 
@@ -812,7 +817,7 @@ fn net_recv_events(
                             p.spawn((
                                 TextBundle::from_section(
                                     line,
-                                    TextStyle { font_size: 16.0, color: Color::srgba(1.0, 1.0, 1.0, 0.95), ..default() },
+                                    TextStyle { font_size: 24.0, color: Color::BLACK, ..default() },
                                 ),
                                 UiKillEntry { timer: Timer::from_seconds(3.0, TimerMode::Once) },
                             ));
@@ -841,17 +846,17 @@ fn net_recv_events(
                     if let Ok(root) = board_root_q.get_single() {
                         if let Some(mut ec) = commands.get_entity(root) { ec.despawn_descendants(); }
                         commands.entity(root).with_children(|p| {
-                            p.spawn(TextBundle::from_section(
-                                format!("{:>6}  {:>5} {:>6}", "ID", "K", "D"),
-                                TextStyle { font_size: 18.0, color: Color::WHITE, ..default() },
-                            ));
+                    p.spawn(TextBundle::from_section(
+                        format!("{:>6}  {:>5} {:>6}", "ID", "K", "D"),
+                        TextStyle { font_size: 28.0, color: Color::BLACK, ..default() },
+                    ));
                             let mut rows = score_data.0.clone();
                             rows.sort_by_key(|e| (-(e.1 as i32), e.2 as i32));
                             for (id, k, d) in rows {
-                                p.spawn(TextBundle::from_section(
-                                    format!("{:>6}  {:>5} {:>6}", id, k, d),
-                                    TextStyle { font_size: 16.0, color: Color::WHITE, ..default() },
-                                ));
+                        p.spawn(TextBundle::from_section(
+                            format!("{:>6}  {:>5} {:>6}", id, k, d),
+                            TextStyle { font_size: 24.0, color: Color::BLACK, ..default() },
+                        ));
                             }
                         });
                     }
