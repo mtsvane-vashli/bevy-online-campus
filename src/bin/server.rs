@@ -234,7 +234,14 @@ fn srv_shoot_and_respawn(
                 }
             }
             if let Some((hit_id, t_hit)) = best {
-                if let Some((_collider, _toi)) = rapier.cast_ray(origin, forward, t_hit, true, QueryFilter::default()) { continue; }
+                // 射線上の障害物チェック（自分自身のコライダーは除外）
+                let mut filter = QueryFilter::default();
+                if let Some(&self_ent) = ents.0.get(&id) { filter = filter.exclude_collider(self_ent); }
+                if let Some((hit_ent, _toi)) = rapier.cast_ray(origin, forward, t_hit, true, filter) {
+                    // もし最初に当たったのが狙っているプレイヤー本人なら遮蔽なしとみなす
+                    let target_ent = ents.0.get(&hit_id).copied();
+                    if Some(hit_ent) != target_ent { continue; }
+                }
                 if let Some(hit) = players.states.get_mut(&hit_id) {
                     if hit.alive {
                         let dmg = 35u16;
