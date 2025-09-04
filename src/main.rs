@@ -62,7 +62,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Bevy FPS".into(),
-                present_mode: bevy::window::PresentMode::AutoVsync,
+                present_mode: if matches!(std::env::var("NO_VSYNC").ok().as_deref(), Some("1" | "true" | "TRUE")) { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync },
                 ..default()
             }),
             ..default()
@@ -104,7 +104,7 @@ fn setup_world(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         DirectionalLightBundle {
             directional_light: DirectionalLight {
-                shadows_enabled: true,
+                shadows_enabled: !matches!(std::env::var("LOW_GFX").ok().as_deref(), Some("1" | "true" | "TRUE")),
                 illuminance: 30_000.0,
                 ..default()
             },
@@ -141,7 +141,7 @@ fn setup_player(mut commands: Commands, mut windows: Query<&mut Window>) {
     // 目線の高さ（プレイヤー中心から +0.7m）
     let cam = Camera3dBundle {
         transform: Transform::from_xyz(0.0, 0.7, 0.0),
-        camera: Camera { hdr: true, ..default() },
+        camera: Camera { hdr: !matches!(std::env::var("LOW_GFX").ok().as_deref(), Some("1" | "true" | "TRUE")), ..default() },
         ..default()
     };
 
@@ -498,7 +498,7 @@ fn net_recv_snapshot(
 ) {
     while let Some(raw) = client.receive_message(CH_SNAPSHOT) {
         if let Ok(ServerMessage::Snapshot(snap)) = bincode::deserialize::<ServerMessage>(&raw) {
-            if snap.players.len() > 0 {
+            if matches!(std::env::var("NET_SNAPSHOT_LOG").ok(), Some(_)) && snap.players.len() > 0 {
                 info!("client: snapshot players={}", snap.players.len());
             }
             for p in snap.players {

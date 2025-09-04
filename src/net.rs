@@ -61,9 +61,17 @@ pub fn connection_config() -> ConnectionConfig { ConnectionConfig::default() }
 
 pub fn new_server() -> (RenetServer, NetcodeServerTransport) {
     let server = RenetServer::new(connection_config());
-    // Bind to all interfaces, but advertise loopback for local testing
-    let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, SERVER_PORT));
-    let public_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SERVER_PORT));
+    // SERVER_ADDR=host:port があればそれを広告先にし、ポートも合わせてバインド
+    let env_server_addr = env::var("SERVER_ADDR").ok().and_then(|s| s.parse::<SocketAddr>().ok());
+    let (public_addr, bind_port) = match env_server_addr {
+        Some(sock) => (sock, sock.port()),
+        None => (
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SERVER_PORT)),
+            SERVER_PORT,
+        ),
+    };
+    // Bind to all interfaces for reachability on LAN
+    let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, bind_port));
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let max_clients = 32;
     let server_config = ServerConfig {
@@ -74,14 +82,18 @@ pub fn new_server() -> (RenetServer, NetcodeServerTransport) {
         authentication: ServerAuthentication::Unsecure,
     };
     let socket = UdpSocket::bind(bind_addr).expect("bind server socket");
-    if let Ok(local) = socket.local_addr() { println!("server socket bound at {} (public {})", local, public_addr); }
+    if let Ok(local) = socket.local_addr() { println!("server socket bound at {} (public {})", local, server_config.public_addresses[0]); }
     let transport = NetcodeServerTransport::new(server_config, socket).expect("transport");
     (server, transport)
 }
 
 pub fn new_client(local_port: Option<u16>) -> (RenetClient, NetcodeClientTransport, ClientId) {
     let client = RenetClient::new(connection_config());
-    let server_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SERVER_PORT));
+    // SERVER_ADDR=host:port があれば優先（同一Wi-Fi/別PC接続向け）。無ければ 127.0.0.1:SERVER_PORT
+    let server_addr = env::var("SERVER_ADDR")
+        .ok()
+        .and_then(|s| s.parse::<SocketAddr>().ok())
+        .unwrap_or_else(|| SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SERVER_PORT)));
     let client_id = ClientId::from_raw(rand::random::<u64>());
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     // Unsecure client (development)
