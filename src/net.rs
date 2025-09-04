@@ -47,6 +47,7 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     Snapshot(SnapshotMsg),
     Event(EventMsg),
+    Score(Vec<ScoreEntry>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +57,9 @@ pub enum EventMsg {
     Hit { target_id: u64, new_hp: u16, by: u64 },
     Death { target_id: u64, by: u64 },
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoreEntry { pub id: u64, pub kills: u32, pub deaths: u32 }
 
 pub fn connection_config() -> ConnectionConfig { ConnectionConfig::default() }
 
