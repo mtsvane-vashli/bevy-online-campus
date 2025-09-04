@@ -43,6 +43,9 @@ struct ServerEntities(HashMap<u64, Entity>);
 #[derive(Resource, Default)]
 struct MapReady(pub bool);
 
+#[derive(Resource, Default)]
+struct Scores(HashMap<u64, (u32, u32)>); // id -> (kills, deaths)
+
 fn main() {
     App::new()
         // ヘッドレス運用: WinitPlugin（X/Wayland依存のイベントループ）を無効化
@@ -65,6 +68,7 @@ fn main() {
         .insert_resource(LastInputs::default())
         .insert_resource(LastFireSeq::default())
         .insert_resource(RespawnTimers::default())
+        .insert_resource(Scores::default())
         .insert_resource(ServerEntities::default())
         .insert_resource(MapReady(false))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
@@ -93,6 +97,7 @@ fn accept_clients(
     mut server: ResMut<RenetServer>,
     mut players: ResMut<Players>,
     mut ents: ResMut<ServerEntities>,
+    mut scores: ResMut<Scores>,
 ) {
     while let Some(event) = server.get_event() {
         match event {
@@ -111,6 +116,7 @@ fn accept_clients(
                 let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [0.0, 10.0, 5.0] });
                 let bytes = bincode::serialize(&ev).unwrap();
                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                scores.0.entry(id).or_insert((0,0));
                 info!("client connected: {}", id);
             }
             bevy_renet::renet::ServerEvent::ClientDisconnected { client_id, reason } => {
@@ -121,6 +127,7 @@ fn accept_clients(
                 let bytes = bincode::serialize(&ev).unwrap();
                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                 info!("client disconnected: {} ({:?})", id, reason);
+                scores.0.remove(&id);
             }
         }
     }
@@ -204,6 +211,7 @@ fn srv_shoot_and_respawn(
     mut server: ResMut<RenetServer>,
     rapier: Res<RapierContext>,
     ents: Res<ServerEntities>,
+    mut scores: ResMut<Scores>,
 ) {
     let dt = time_fixed.delta_seconds();
     // immutable snapshot of states for safe iteration
@@ -256,6 +264,13 @@ fn srv_shoot_and_respawn(
                             let bytes = bincode::serialize(&ev).unwrap();
                             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                             respawns.0.insert(hit_id, 2.0);
+                            // update scores and broadcast
+                            let e = scores.0.entry(id).or_insert((0,0)); e.0 = e.0.saturating_add(1);
+                            let e2 = scores.0.entry(hit_id).or_insert((0,0)); e2.1 = e2.1.saturating_add(1);
+                            let table: Vec<ScoreEntry> = scores.0.iter().map(|(id,(k,d))| ScoreEntry{ id:*id, kills:*k as u32, deaths:*d as u32}).collect();
+                            if let Ok(bytes) = bincode::serialize(&ServerMessage::Score(table)) {
+                                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                            }
                         }
                     }
                 }
@@ -312,6 +327,7 @@ fn sync_players_with_connections(
     mut server: ResMut<RenetServer>,
     mut players: ResMut<Players>,
     mut ents: ResMut<ServerEntities>,
+    mut scores: ResMut<Scores>,
 ) {
     use std::collections::HashSet;
     let current: HashSet<u64> = server.clients_id().iter().map(|c| c.raw()).collect();
@@ -331,6 +347,11 @@ fn sync_players_with_connections(
             let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z] });
             let bytes = bincode::serialize(&ev).unwrap();
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            scores.0.entry(id).or_insert((0,0));
+            let table: Vec<ScoreEntry> = scores.0.iter().map(|(id,(k,d))| ScoreEntry{ id:*id, kills:*k as u32, deaths:*d as u32}).collect();
+            if let Ok(bytes) = bincode::serialize(&ServerMessage::Score(table)) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
         }
     }
 
@@ -344,6 +365,7 @@ fn sync_players_with_connections(
             let ev = ServerMessage::Event(EventMsg::Despawn { id });
             let bytes = bincode::serialize(&ev).unwrap();
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            scores.0.remove(&id);
         }
     }
 }
