@@ -50,6 +50,8 @@ struct Scores(HashMap<u64, (u32, u32)>); // id -> (kills, deaths)
 
 #[derive(Resource, Default)]
 struct SpawnPoints(pub Vec<Vec3>);
+#[derive(Resource, Default)]
+struct JumpCounts(HashMap<u64, u8>);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RoundPhase { Active, Ending }
@@ -201,6 +203,7 @@ fn srv_kcc_move(
     last: Res<LastInputs>,
     mut q: Query<&mut KinematicCharacterController>,
     ready: Res<MapReady>,
+    mut jumps: ResMut<JumpCounts>,
 ) {
     if !ready.0 { return; }
     let dt = time_fixed.delta_seconds();
@@ -218,7 +221,13 @@ fn srv_kcc_move(
             let mut speed = 6.0;
             if inp.run { speed *= 1.7; }
             let mut vy = state.vy - 9.81 * dt;
-            if inp.jump && state.grounded { vy = 5.2; }
+            if inp.jump {
+                let used = jumps.0.entry(*id).or_insert(0);
+                if state.grounded || *used < 1 {
+                    vy = 5.2;
+                    if !state.grounded { *used = used.saturating_add(1); }
+                }
+            }
             let motion = horiz * speed * dt + Vec3::Y * vy * dt;
             kcc.translation = Some(motion);
             state.vy = vy;
@@ -232,6 +241,7 @@ fn srv_kcc_post(
     mut players: ResMut<Players>,
     ents: Res<ServerEntities>,
     q: Query<(&GlobalTransform, Option<&KinematicCharacterControllerOutput>)>,
+    mut jumps: ResMut<JumpCounts>,
 ) {
     for (id, state) in players.states.iter_mut() {
         let Some(&entity) = ents.0.get(id) else { continue };
@@ -239,7 +249,10 @@ fn srv_kcc_post(
             state.pos = gt.translation();
             if let Some(o) = out {
                 state.grounded = o.grounded;
-                if o.grounded && state.vy <= 0.0 { state.vy = 0.0; }
+                if o.grounded && state.vy <= 0.0 {
+                    state.vy = 0.0;
+                    if let Some(j) = jumps.0.get_mut(id) { *j = 0; }
+                }
             }
         }
     }
@@ -525,6 +538,7 @@ fn round_update(
     mut server: ResMut<RenetServer>,
     mut respawns: ResMut<RespawnTimers>,
     spawns: Res<SpawnPoints>,
+    mut jumps: ResMut<JumpCounts>,
 ) {
     let dt = time_fixed.delta_seconds();
     match round.phase {
@@ -561,6 +575,7 @@ fn round_update(
                         state.pos = spawn;
                         state.vy = 0.0;
                         state.grounded = true;
+                        if let Some(j) = jumps.0.get_mut(&id) { *j = 0; }
                         // 送信
                         let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [state.pos.x, state.pos.y, state.pos.z] });
                         if let Ok(bytes) = bincode::serialize(&ev) {

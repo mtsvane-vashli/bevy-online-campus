@@ -83,6 +83,7 @@ struct CursorLocked(pub bool);
 struct Controller {
     vy: f32,
     on_ground: bool,
+    jumps: u8, // 空中で使ったジャンプ回数（2段ジャンプ用）
 }
 
 #[derive(Resource, Default)]
@@ -486,9 +487,13 @@ fn kcc_move_system(
     // 重力・ジャンプ
     let dt = time.delta_seconds();
     ctrl.vy -= GRAVITY * dt;
-    if keys.just_pressed(KeyCode::Space) && ctrl.on_ground {
-        ctrl.vy = JUMP_SPEED;
-        ctrl.on_ground = false;
+    if keys.just_pressed(KeyCode::Space) {
+        // 地上なら通常ジャンプ、空中なら1回だけ追加ジャンプを許可
+        if ctrl.on_ground || ctrl.jumps < 1 {
+            ctrl.vy = JUMP_SPEED;
+            if !ctrl.on_ground { ctrl.jumps = ctrl.jumps.saturating_add(1); }
+            ctrl.on_ground = false;
+        }
     }
 
     let motion = horiz * speed * dt + Vec3::Y * ctrl.vy * dt;
@@ -503,6 +508,7 @@ fn kcc_post_step_system(
         ctrl.on_ground = out.grounded;
         if out.grounded && ctrl.vy <= 0.0 {
             ctrl.vy = 0.0;
+            ctrl.jumps = 0; // 地上に戻ったら空中ジャンプ回数をリセット
         }
     }
 }
