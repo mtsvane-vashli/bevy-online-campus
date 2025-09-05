@@ -2,6 +2,7 @@
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::window::CursorGrabMode;
 use bevy::window::WindowFocused;
 use bevy_rapier3d::prelude::*;
@@ -35,6 +36,12 @@ fn wrap_pi(a: f32) -> f32 {
 // ===== HUD Components =====
 #[derive(Component)]
 struct UiHp;
+
+#[derive(Component)]
+struct UiFps;
+
+#[derive(Resource)]
+struct FpsTextTimer(Timer);
 
 #[derive(Component)]
 struct UiHitMarker { timer: Timer }
@@ -96,6 +103,7 @@ fn main() {
         .insert_resource(CursorLocked(true))
         .insert_resource(MapReady(false))
         .insert_resource(ConnStatePrev::default())
+        .insert_resource(FpsTextTimer(Timer::from_seconds(0.5, TimerMode::Repeating)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Bevy FPS".into(),
@@ -105,6 +113,7 @@ fn main() {
             ..default()
         }))
         .add_plugins((RenetClientPlugin, NetcodeClientPlugin))
+        .add_plugins(FrameTimeDiagnosticsPlugin)
         .add_plugins((
             RapierPhysicsPlugin::<NoUserData>::default(),
             // デバッグ表示が欲しい場合は下を有効化
@@ -131,6 +140,7 @@ fn main() {
             hud_tick_killlog,
             scoreboard_toggle,
             hud_update_ammo,
+            fps_update_system,
         ))
         .run();
 }
@@ -302,6 +312,16 @@ fn setup_hud(mut commands: Commands) {
         )
         .with_style(Style { position_type: PositionType::Absolute, left: Val::Px(10.0), bottom: Val::Px(10.0), ..default() }),
         UiHp,
+    ));
+
+    // FPS表示（左上）
+    commands.spawn((
+        TextBundle::from_section(
+            "FPS: --",
+            TextStyle { font_size: 18.0, color: Color::BLACK, ..default() },
+        )
+        .with_style(Style { position_type: PositionType::Absolute, left: Val::Px(10.0), top: Val::Px(10.0), ..default() }),
+        UiFps,
     ));
 
     // ヒットマーカー（中心に薄いX、初期は透過）
@@ -689,6 +709,26 @@ fn hud_update_ammo(mut q: Query<&mut Text, With<UiAmmo>>, ammo: Res<LocalAmmo>) 
             t.sections[0].value = format!("Reloading...");
         } else {
             t.sections[0].value = format!("Ammo: {}", ammo.ammo);
+        }
+    }
+}
+
+fn fps_update_system(
+    time: Res<Time>,
+    diagnostics: Res<DiagnosticsStore>,
+    mut timer: ResMut<FpsTextTimer>,
+    mut q: Query<&mut Text, With<UiFps>>,
+) {
+    timer.0.tick(time.delta());
+    if !timer.0.finished() { return; }
+
+    if let Ok(mut t) = q.get_single_mut() {
+        if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
+            if let Some(avg) = fps.smoothed() {
+                t.sections[0].value = format!("FPS: {:.0}", avg);
+            } else if let Some(val) = fps.value() {
+                t.sections[0].value = format!("FPS: {:.0}", val);
+            }
         }
     }
 }
