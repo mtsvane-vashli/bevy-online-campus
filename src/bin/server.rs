@@ -466,10 +466,10 @@ fn bot_ai_shoot_and_respawn(
             let to = (p.pos + Vec3::new(0.0,0.7,0.0)) - origin;
             let dist = to.length();
             if dist > range { continue; }
-            let cos = forward.normalize().dot(to.normalize());
-            if cos < BOT_FOV_COS { continue; }
+            // (removed FOV gating)
+            //
             // 視野内の前方で最も近いターゲットを選択（横ずれ判定は行わず、遮蔽は後段のレイ判定で）
-            let t = to.dot(forward).clamp(0.0, range);
+            let t = dist;
             if best.map_or(true, |(_,bt)| t < bt) { best = Some((*pid, t)); }
         }
         if let Some((hit_id, t_hit)) = best {
