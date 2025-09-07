@@ -784,7 +784,7 @@ fn net_recv_snapshot(
                         }
                     } else {
                         let mesh = meshes.add(Cuboid::new(0.4, 1.8, 0.4));
-                    let mat = materials.add(Color::srgb(0.2, 0.9, 0.3));
+                        let mat = materials.add(match p.kind { ActorKind::Human => Color::srgb(0.2, 0.9, 0.3), ActorKind::Bot => Color::srgb(0.9, 0.2, 0.2) });
                         let ent = commands.spawn((
                             PbrBundle { mesh, material: mat, transform: Transform::from_translation(pos), ..default() },
                             RemoteAvatar { id: p.id },
@@ -821,7 +821,7 @@ fn net_recv_events(
         if let Ok(msg) = bincode::deserialize::<ServerMessage>(&raw) {
             match msg {
                 ServerMessage::Event(ev) => match ev {
-                    EventMsg::Spawn { id, pos } => {
+                    EventMsg::Spawn { id, pos, kind } => {
                     let p = Vec3::new(pos[0], pos[1], pos[2]);
                     if id == local.id {
                         self_auth.pos = Some(p);
@@ -833,7 +833,7 @@ fn net_recv_events(
                             }
                         } else {
                             let mesh = meshes.add(Cuboid::new(0.4, 1.8, 0.4));
-                            let mat = materials.add(Color::srgb(0.2, 0.9, 0.3));
+                            let mat = materials.add(match kind { ActorKind::Human => Color::srgb(0.2, 0.9, 0.3), ActorKind::Bot => Color::srgb(0.9, 0.2, 0.2) });
                             let ent = commands.spawn((PbrBundle { mesh, material: mat, transform: Transform::from_translation(p), ..default() }, RemoteAvatar { id })).id();
                             remap.0.insert(id, ent);
                         }
