@@ -107,6 +107,7 @@ const BOT_ID_START: u64 = 1_000_000_000_000; // 衝突低確率な帯を使用
 const BOT_MOVE_SPEED: f32 = 5.5;
 const BOT_FIRE_RANGE: f32 = 60.0;
 const BOT_FOV_COS: f32 = 0.2; // 約78度
+const BOT_TURN_RATE: f32 = 6.0; // rad/s: 向き直り速度
 
 fn main() {
     App::new()
@@ -340,8 +341,10 @@ fn bot_kcc_move(
         if target_dir.length_squared() > 1e-6 {
             let dir = target_dir.normalize();
             let desired_yaw = dir.z.atan2(dir.x) + std::f32::consts::FRAC_PI_2;
-            let dy = (desired_yaw - state.yaw).atan2(1.0).clamp(-3.0*dt, 3.0*dt);
-            state.yaw += dy;
+            // 正しい角度差でスムーズに向き直る
+            let mut delta = (desired_yaw - state.yaw + std::f32::consts::PI).rem_euclid(2.0*std::f32::consts::PI) - std::f32::consts::PI;
+            delta = delta.clamp(-BOT_TURN_RATE*dt, BOT_TURN_RATE*dt);
+            state.yaw += delta;
             if let Ok(mut kcc) = q.get_mut(entity) {
                 let vy = state.vy - 9.81 * dt;
                 kcc.translation = Some(dir * BOT_MOVE_SPEED * dt + Vec3::Y * vy * dt);
@@ -426,13 +429,9 @@ fn bot_ai_shoot_and_respawn(
             if dist > range { continue; }
             let cos = forward.normalize().dot(to.normalize());
             if cos < BOT_FOV_COS { continue; }
-            // 横ずれ距離
+            // 視野内の前方で最も近いターゲットを選択（横ずれ判定は行わず、遮蔽は後段のレイ判定で）
             let t = to.dot(forward).clamp(0.0, range);
-            let closest = origin + forward * t;
-            let dist2 = (p.pos + Vec3::new(0.0,0.7,0.0) - closest).length_squared();
-            if dist2 <= 0.35*0.35 {
-                if best.map_or(true, |(_,bt)| t < bt) { best = Some((*pid, t)); }
-            }
+            if best.map_or(true, |(_,bt)| t < bt) { best = Some((*pid, t)); }
         }
         if let Some((hit_id, t_hit)) = best {
             // Fire event（Bot）: 衝突点をレイで取得
