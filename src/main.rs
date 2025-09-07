@@ -159,7 +159,6 @@ fn main() {
             hud_update_hp,
             hud_tick_hit_marker,
             hud_tick_killlog,
-            scoreboard_toggle,
             hud_update_ammo,
             fps_update_system,
         ))
@@ -990,7 +989,7 @@ fn reconcile_self(
             tf.translation += diff * step;
         }
     }
-    if let Some(yaw) = self_auth.yaw {
+    if matches!(std::env::var("RECONCILE_YAW").ok().as_deref(), Some("1" | "true" | "TRUE")) { if let Some(yaw) = self_auth.yaw {
         // 軽い追従のみ（強いワープは避ける）
         let current_yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
         let delta = wrap_pi(yaw - current_yaw);
@@ -1010,7 +1009,7 @@ fn scoreboard_toggle(
                 _ => Visibility::Hidden,
             };
         }
-    }
+    } }
 }
 
 // --- VFX tickers ---
