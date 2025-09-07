@@ -60,6 +60,7 @@ pub enum EventMsg {
     RoundStart { time_left_sec: u32 },
     RoundEnd { winner_id: Option<u64>, next_in_sec: u32 },
     Ammo { id: u64, ammo: u16, reloading: bool },
+    Fire { id: u64, origin: [f32; 3], dir: [f32; 3], hit: Option<[f32; 3]> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

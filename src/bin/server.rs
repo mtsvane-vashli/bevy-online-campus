@@ -435,6 +435,15 @@ fn bot_ai_shoot_and_respawn(
             }
         }
         if let Some((hit_id, t_hit)) = best {
+            // Fire event（Bot）: 衝突点をレイで取得
+            let mut filter_fire = QueryFilter::default();
+            if let Some(&self_ent) = ents.0.get(id) { filter_fire = filter_fire.exclude_collider(self_ent); }
+            let hit_opt = if let Some((_hit_ent, toi)) = rapier.cast_ray(origin, forward, range, true, filter_fire) {
+                Some([origin.x + forward.x * toi, origin.y + forward.y * toi, origin.z + forward.z * toi])
+            } else { None };
+            if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire { id: *id, origin: [origin.x, origin.y, origin.z], dir: [forward.x, forward.y, forward.z], hit: hit_opt })) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
             // 遮蔽レイ判定（自身は除外）
             let mut filter = QueryFilter::default();
             if let Some(&self_ent) = ents.0.get(id) { filter = filter.exclude_collider(self_ent); }
@@ -552,6 +561,15 @@ fn srv_shoot_and_respawn(
             let forward = yaw_rot * pitch_rot * Vec3::NEG_Z;
             let origin = pos + Vec3::new(0.0, 0.7, 0.0);
             let range = 100.0f32;
+            // Send Fire event (with first hit point if any)
+            let mut filter_fire = QueryFilter::default();
+            if let Some(&self_ent) = ents.0.get(&id) { filter_fire = filter_fire.exclude_collider(self_ent); }
+            let hit_opt = if let Some((_hit_ent, toi)) = rapier.cast_ray(origin, forward, range, true, filter_fire) {
+                Some([origin.x + forward.x * toi, origin.y + forward.y * toi, origin.z + forward.z * toi])
+            } else { None };
+            if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire { id, origin: [origin.x, origin.y, origin.z], dir: [forward.x, forward.y, forward.z], hit: hit_opt })) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
             let mut best: Option<(u64, f32)> = None;
             for (oid, opos, oalive) in snap.iter().copied() {
                 if oid == id || !oalive { continue; }

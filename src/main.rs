@@ -67,6 +67,25 @@ struct RoundUi { phase_end: Option<Timer>, time_left: f32, winner: Option<u64> }
 #[derive(Resource, Default)]
 struct LocalAmmo { ammo: u16, reloading: bool }
 
+// VFX components
+#[derive(Component)]
+struct MuzzleFx { timer: Timer }
+
+#[derive(Component)]
+struct TracerFx { timer: Timer }
+
+#[derive(Component)]
+struct ImpactFx { timer: Timer }
+
+#[derive(Resource, Default)]
+struct ActorKindsMap(std::collections::HashMap<u64, ActorKind>);
+
+#[derive(Resource, Default)]
+struct ActorPositions(std::collections::HashMap<u64, Vec3>);
+
+#[derive(Component)]
+struct UiDamageVignette { timer: Timer }
+
 #[derive(Component)]
 struct Player;
 
@@ -104,6 +123,8 @@ fn main() {
         .insert_resource(MapReady(false))
         .insert_resource(ConnStatePrev::default())
         .insert_resource(FpsTextTimer(Timer::from_seconds(0.5, TimerMode::Repeating)))
+        .insert_resource(ActorKindsMap::default())
+        .insert_resource(ActorPositions::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Bevy FPS".into(),
@@ -142,6 +163,7 @@ fn main() {
             hud_update_ammo,
             fps_update_system,
         ))
+        .add_systems(Update, vfx_tick_and_cleanup)
         .run();
 }
 
@@ -764,6 +786,8 @@ fn net_recv_snapshot(
     mut materials: ResMut<Assets<StandardMaterial>>,
     local: Res<LocalNetInfo>,
     mut self_auth: ResMut<AuthoritativeSelf>,
+    mut kinds: ResMut<ActorKindsMap>,
+    mut positions: ResMut<ActorPositions>,
 ) {
     while let Some(raw) = client.receive_message(CH_SNAPSHOT) {
         if let Ok(ServerMessage::Snapshot(snap)) = bincode::deserialize::<ServerMessage>(&raw) {
@@ -771,6 +795,8 @@ fn net_recv_snapshot(
                 info!("client: snapshot players={}", snap.players.len());
             }
             for p in snap.players {
+                kinds.0.insert(p.id, p.kind);
+                positions.0.insert(p.id, Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
                 if p.id == local.id {
                     self_auth.pos = Some(Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
                     self_auth.yaw = Some(p.yaw);
@@ -816,6 +842,7 @@ fn net_recv_events(
     board_root_q: Query<Entity, With<UiScoreboard>>,
     mut round_ui: ResMut<RoundUi>,
     mut local_ammo: ResMut<LocalAmmo>,
+    mut kinds: ResMut<ActorKindsMap>,
 ) {
     while let Some(raw) = client.receive_message(CH_RELIABLE) {
         if let Ok(msg) = bincode::deserialize::<ServerMessage>(&raw) {
@@ -823,6 +850,7 @@ fn net_recv_events(
                 ServerMessage::Event(ev) => match ev {
                     EventMsg::Spawn { id, pos, kind } => {
                     let p = Vec3::new(pos[0], pos[1], pos[2]);
+                    kinds.0.insert(id, kind);
                     if id == local.id {
                         self_auth.pos = Some(p);
                         my_hp.hp = 100;
@@ -850,6 +878,17 @@ fn net_recv_events(
                             hm.timer.reset();
                         }
                     }
+                    if target_id == local.id {
+                        // Add damage vignette overlay
+                        commands.spawn((
+                            NodeBundle {
+                                style: Style { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
+                                background_color: BackgroundColor(Color::rgba(0.8, 0.0, 0.0, 0.35)),
+                                ..default()
+                            },
+                            UiDamageVignette { timer: Timer::from_seconds(0.4, TimerMode::Once) },
+                        ));
+                    }
                 }
                 EventMsg::Death { target_id, by } => {
                     if target_id == local.id { my_hp.hp = 0; }
@@ -869,6 +908,28 @@ fn net_recv_events(
                             ));
                         });
                     }
+                }
+                EventMsg::Fire { id, origin, dir, hit } => {
+                    // VFX: muzzle + tracer (+ impact)
+                    let o = Vec3::new(origin[0], origin[1], origin[2]);
+                    let d = Vec3::new(dir[0], dir[1], dir[2]).normalize_or_zero();
+                    let end = match hit { Some(h) => Vec3::new(h[0], h[1], h[2]), None => o + d * 50.0 };
+                    let col = match kinds.0.get(&id).copied() { Some(ActorKind::Bot) => Color::srgb(0.95, 0.25, 0.2), _ => Color::srgb(0.95, 0.9, 0.2) };
+                    // muzzle
+                    let mmesh = meshes.add(Cuboid::new(0.06, 0.06, 0.06));
+                    let mmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
+                    commands.spawn((PbrBundle { mesh: mmesh, material: mmat, transform: Transform::from_translation(o), ..default() }, MuzzleFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
+                    // tracer
+                    let seg = end - o; let len = seg.length();
+                    if len > 0.001 {
+                        let tmesh = meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
+                        let tmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
+                        let rot = Quat::from_rotation_arc(Vec3::Z, seg.normalize());
+                        let pos = o + seg * 0.5;
+                        commands.spawn((PbrBundle { mesh: tmesh, material: tmat, transform: Transform { translation: pos, rotation: rot, scale: Vec3::ONE }, ..default() }, TracerFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
+                    }
+                    // impact
+                    if let Some(h) = hit { let hp = Vec3::new(h[0], h[1], h[2]); let imesh = meshes.add(Cuboid::new(0.05, 0.05, 0.02)); let imat = materials.add(StandardMaterial { base_color: Color::srgb(1.0, 0.6, 0.3), emissive: Color::srgb(1.0, 0.6, 0.3).into(), unlit: true, ..default() }); commands.spawn((PbrBundle { mesh: imesh, material: imat, transform: Transform::from_translation(hp), ..default() }, ImpactFx { timer: Timer::from_seconds(0.2, TimerMode::Once) })); }
                 }
                 EventMsg::RoundStart { time_left_sec } => {
                     round_ui.phase_end = None;
@@ -949,5 +1010,28 @@ fn scoreboard_toggle(
                 _ => Visibility::Hidden,
             };
         }
+    }
+}
+
+// --- VFX tickers ---
+fn vfx_tick_and_cleanup(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q_muzzle: Query<(Entity, &mut MuzzleFx)>,
+    mut q_tracer: Query<(Entity, &mut TracerFx)>,
+    mut q_impact: Query<(Entity, &mut ImpactFx)>,
+    mut q_vign: Query<(Entity, &mut UiDamageVignette)>,
+    mut bg_colors: Query<&mut BackgroundColor>,
+) {
+    for (e, mut fx) in &mut q_muzzle { fx.timer.tick(time.delta()); if fx.timer.finished() { commands.entity(e).despawn_recursive(); } }
+    for (e, mut fx) in &mut q_tracer { fx.timer.tick(time.delta()); if fx.timer.finished() { commands.entity(e).despawn_recursive(); } }
+    for (e, mut fx) in &mut q_impact { fx.timer.tick(time.delta()); if fx.timer.finished() { commands.entity(e).despawn_recursive(); } }
+    for (e, mut v) in &mut q_vign {
+        v.timer.tick(time.delta());
+        if let Ok(mut col) = bg_colors.get_mut(e) {
+            let t = (1.0 - (v.timer.elapsed_secs() / v.timer.duration().as_secs_f32())).clamp(0.0, 1.0);
+            col.0 = Color::rgba(0.8, 0.0, 0.0, 0.35 * t);
+        }
+        if v.timer.finished() { commands.entity(e).despawn_recursive(); }
     }
 }
