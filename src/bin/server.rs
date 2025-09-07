@@ -587,7 +587,8 @@ fn srv_shoot_and_respawn(
                 if players.states.contains_key(&hit_id) { if let Some((hit_ent, _toi)) = rapier.cast_ray(origin, forward, t_hit, true, filter) {
                     // もし最初に当たったのが狙っているプレイヤー本人なら遮蔽なしとみなす
                     let target_ent = ents.0.get(&hit_id).copied();
-                    if Some(hit_ent) != target_ent { continue; }
+                    let target_ent_bot = bot_ents.0.get(&hit_id).copied();
+                    if Some(hit_ent) != target_ent && Some(hit_ent) != target_ent_bot { continue; }
                 } }
                 if let Some(hit) = players.states.get_mut(&hit_id) {
                     if hit.alive {
