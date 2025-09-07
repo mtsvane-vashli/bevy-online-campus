@@ -398,6 +398,7 @@ fn bot_kcc_post(
 }
 
 fn bot_ai_shoot_and_respawn(
+    mut commands: Commands,
     time_fixed: Res<Time<Fixed>>,
     mut players: ResMut<Players>,
     mut bots: ResMut<Bots>,
@@ -409,6 +410,7 @@ fn bot_ai_shoot_and_respawn(
     mut respawns_players: ResMut<RespawnTimers>,
     mut respawns_bots: ResMut<BotRespawnTimers>,
     spawns: Res<SpawnPoints>,
+    bot_ents: Res<BotEntities>,
 ) {
     let dt = time_fixed.delta_seconds();
     // 射撃（Bot→人間のみ、FFなし）
@@ -484,6 +486,9 @@ fn bot_ai_shoot_and_respawn(
         if let Some(b) = bots.states.get_mut(&bid) {
             let spawn = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { Vec3::new(0.0, 10.0, 5.0) };
             b.alive = true; b.hp = 100; b.pos = spawn; b.vy = 0.0; b.grounded = true;
+            if let Some(&e) = bot_ents.0.get(&bid) {
+                commands.entity(e).insert(TransformBundle::from_transform(Transform::from_translation(spawn)));
+            }
             let ev = ServerMessage::Event(EventMsg::Spawn { id: bid, pos: [spawn.x, spawn.y, spawn.z], kind: ActorKind::Bot });
             if let Ok(bytes) = bincode::serialize(&ev) { for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
             // 武器リセット
@@ -494,6 +499,7 @@ fn bot_ai_shoot_and_respawn(
 }
 
 fn srv_shoot_and_respawn(
+    mut commands: Commands,
     time_fixed: Res<Time<Fixed>>,
     mut players: ResMut<Players>,
     mut bots: ResMut<Bots>,
@@ -654,6 +660,9 @@ fn srv_shoot_and_respawn(
             p.pos = spawn;
             p.vy = 0.0;
             p.grounded = true;
+            if let Some(&e) = ents.0.get(&pid) {
+                commands.entity(e).insert(TransformBundle::from_transform(Transform::from_translation(spawn)));
+            }
             let ev = ServerMessage::Event(EventMsg::Spawn { id: pid, pos: [p.pos.x, p.pos.y, p.pos.z], kind: ActorKind::Human });
             let bytes = bincode::serialize(&ev).unwrap();
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
