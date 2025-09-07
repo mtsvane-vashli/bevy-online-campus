@@ -62,12 +62,34 @@ struct BotFocus(HashMap<u64, (Option<u64>, f32)>); // (target_id, lock_time)
 
 #[derive(SystemParam)]
 struct WpnProt<'w> {
-    weapons: ResMut<'w, Weapons>,
     protect: ResMut<'w, ProtectTimers>,
+    weapons: ResMut<'w, Weapons>,
 }
 
 #[derive(Resource, Default)]
+struct BotWander(HashMap<u64, (Vec3, f32)>); // (target, timer)
+
+#[derive(Resource, Default)]
+struct BotLosMissing(HashMap<u64, f32>); // 秒数
+
+#[derive(Resource, Default)]
 struct LastInputs(HashMap<u64, InputFrame>);
+
+// --- Bot FSM/state resources ---
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BotFsm { Wander, Seek, Combat, Lost }
+
+#[derive(Resource, Default)]
+struct BotFSM(HashMap<u64, (BotFsm, f32)>); // (state, timer)
+
+#[derive(Resource, Default)]
+struct BotTarget(HashMap<u64, Option<u64>>);
+
+#[derive(Resource, Default)]
+struct BotStrafe(HashMap<u64, (f32, f32)>); // (dir_sign, timer)
+
+#[derive(Resource, Default)]
+struct BotSafePos(HashMap<u64, Vec3>);
 
 #[derive(Resource, Default)]
 struct LastFireSeq(HashMap<u64, u32>);
@@ -102,6 +124,20 @@ struct RoundState {
 const WIN_KILLS: u32 = 10;
 const ROUND_TIME_SEC: f32 = 300.0; // 5 min
 const ROUND_END_DELAY_SEC: f32 = 5.0;
+
+// --- Bot Perception/Movement params ---
+const BOT_DETECT_RANGE: f32 = 30.0; // 発見距離（3D）
+const BOT_DESIRED_NEAR: f32 = 10.0; // 適正距離下限
+const BOT_DESIRED_FAR: f32 = 22.0;  // 適正距離上限
+const BOT_STRAFE_SPEED_MUL: f32 = 0.8; // ストラフェ速度倍率
+const BOT_STRAFE_SWITCH_SEC: f32 = 2.0; // ストラフェ左右切替間隔
+const BOT_LOS_GRACE_SEC: f32 = 0.6; // LoS喪失から Lost 遷移まで
+const BOT_LOST_TO_WANDER_SEC: f32 = 2.0; // Lost 状態から Wander 復帰
+const BOT_WANDER_RADIUS: f32 = 16.0; // 徘徊サンプル半径
+const BOT_WANDER_REPLAN_SEC: f32 = 4.0; // 徘徊目的地の再計画間隔
+const BOT_WANDER_RETRY: usize = 8; // 地面投影のリトライ回数
+const BOT_PROBE_AHEAD: f32 = 1.2; // 落下防止: 前方プローブ距離
+const BOT_MAX_DROP: f32 = 0.7; // 落差しきい値
 
 // Weapon constants
 const MAG_SIZE: u16 = 12;
@@ -165,6 +201,12 @@ fn main() {
         .insert_resource(NextBotId(BOT_ID_START))
         .insert_resource(ProtectTimers::default())
         .insert_resource(BotFocus::default())
+        .insert_resource(BotWander::default())
+        .insert_resource(BotLosMissing::default())
+        .insert_resource(BotFSM::default())
+        .insert_resource(BotTarget::default())
+        .insert_resource(BotStrafe::default())
+        .insert_resource(BotSafePos::default())
         .insert_resource(MapReady(false))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(SnapshotTimer(Timer::from_seconds(1.0/30.0, TimerMode::Repeating)))
@@ -174,7 +216,9 @@ fn main() {
         .add_systems(Update, sync_players_with_connections)
         .add_systems(FixedUpdate, recv_inputs)
         .add_systems(FixedUpdate, srv_kcc_move.before(PhysicsSet::StepSimulation))
-        .add_systems(FixedUpdate, bot_kcc_move.before(PhysicsSet::StepSimulation))
+        .add_systems(FixedUpdate, bot_ai_perception_and_fsm.before(PhysicsSet::StepSimulation))
+        .add_systems(FixedUpdate, bot_wander_planner.before(PhysicsSet::StepSimulation))
+        .add_systems(FixedUpdate, bot_kcc_move_fsm.before(PhysicsSet::StepSimulation))
         .add_systems(FixedUpdate, srv_kcc_post.after(PhysicsSet::Writeback))
         .add_systems(FixedUpdate, bot_kcc_post.after(PhysicsSet::Writeback))
         .add_systems(FixedUpdate, srv_shoot_and_respawn.after(srv_kcc_post))
@@ -350,6 +394,104 @@ fn srv_kcc_move(
     }
 }
 
+// --- Bot Perception + FSM update ---
+fn bot_ai_perception_and_fsm(
+    time_fixed: Res<Time<Fixed>>,
+    players: Res<Players>,
+    bots: Res<Bots>,
+    ents: Res<ServerEntities>,
+    bot_ents: Res<BotEntities>,
+    rapier: Res<RapierContext>,
+    mut fsm: ResMut<BotFSM>,
+    mut target: ResMut<BotTarget>,
+    mut los_missing: ResMut<BotLosMissing>,
+) {
+    let dt = time_fixed.delta_seconds();
+    for (id, b) in bots.states.iter() {
+        if !b.alive { continue; }
+        let origin = b.pos + Vec3::new(0.0, 0.7, 0.0);
+        // search nearest visible human within range
+        let mut best: Option<(u64, f32)> = None;
+        for (pid, p) in players.states.iter() {
+            if !p.alive { continue; }
+            let to = (p.pos + Vec3::new(0.0,0.7,0.0)) - origin;
+            let dist = to.length();
+            if dist > BOT_DETECT_RANGE { continue; }
+            // LoS check: exclude self
+            let mut filter = QueryFilter::default();
+            if let Some(&self_ent) = bot_ents.0.get(id) { filter = filter.exclude_collider(self_ent); }
+            let dir = if dist > 0.0 { to / dist } else { Vec3::ZERO };
+            if dir.length_squared() < 1e-6 { continue; }
+            if let Some((hit_ent, _)) = rapier.cast_ray(origin, dir, dist, true, filter) {
+                if let Some(&target_ent) = ents.0.get(pid) {
+                    if hit_ent != target_ent { continue; }
+                } else { continue; }
+            } else { continue; }
+            if best.map_or(true, |(_,bd)| dist < bd) { best = Some((*pid, dist)); }
+        }
+        let entry = fsm.0.entry(*id).or_insert((BotFsm::Wander, 0.0));
+        let tgt = target.0.entry(*id).or_insert(None);
+        if let Some((pid, dist)) = best {
+            *tgt = Some(pid);
+            los_missing.0.insert(*id, 0.0);
+            entry.0 = if dist < BOT_DESIRED_NEAR || dist > BOT_DESIRED_FAR { BotFsm::Seek } else { BotFsm::Combat };
+            // timer used for Lost only; reset here
+            entry.1 = 0.0;
+        } else {
+            // no visible target
+            let miss = los_missing.0.entry(*id).or_insert(0.0);
+            *miss += dt;
+            if tgt.is_some() && *miss >= BOT_LOS_GRACE_SEC {
+                *tgt = None;
+                entry.0 = BotFsm::Lost;
+                entry.1 = BOT_LOST_TO_WANDER_SEC;
+                *miss = 0.0;
+            } else if entry.0 == BotFsm::Lost {
+                if entry.1 > 0.0 { entry.1 = (entry.1 - dt).max(0.0); }
+                if entry.1 == 0.0 { entry.0 = BotFsm::Wander; }
+            } else {
+                entry.0 = BotFsm::Wander;
+            }
+        }
+    }
+}
+
+// Plan wander targets by sampling XZ and projecting down onto ground
+fn bot_wander_planner(
+    time_fixed: Res<Time<Fixed>>,
+    bots: Res<Bots>,
+    rapier: Res<RapierContext>,
+    mut wander: ResMut<BotWander>,
+) {
+    let dt = time_fixed.delta_seconds();
+    for (id, b) in bots.states.iter() {
+        if !b.alive { continue; }
+        // tick timer
+        if let Some((pos, t)) = wander.0.get_mut(id) { *t -= dt; }
+        let need_new = match wander.0.get(id) { Some((p, t)) => (*t <= 0.0) || (b.pos.distance(*p) < 1.0), None => true };
+        if need_new {
+            let center = b.pos;
+            let mut chosen: Option<Vec3> = None;
+            for _ in 0..BOT_WANDER_RETRY {
+                let ang = rand::random::<f32>() * std::f32::consts::TAU;
+                let rad = rand::random::<f32>() * BOT_WANDER_RADIUS;
+                let dx = ang.cos() * rad;
+                let dz = ang.sin() * rad;
+                let x = center.x + dx; let z = center.z + dz;
+                let start_y = center.y + 30.0;
+                let origin = Vec3::new(x, start_y, z);
+                if let Some((_ent, toi)) = rapier.cast_ray(origin, Vec3::NEG_Y, 100.0, true, QueryFilter::default()) {
+                    let gy = start_y - toi;
+                    chosen = Some(Vec3::new(x, gy + 0.01, z));
+                    break;
+                }
+            }
+            let dest = chosen.unwrap_or(center);
+            wander.0.insert(*id, (dest, BOT_WANDER_REPLAN_SEC));
+        }
+    }
+}
+
 fn bot_kcc_move(
     time_fixed: Res<Time<Fixed>>,
     mut bots: ResMut<Bots>,
@@ -391,6 +533,91 @@ fn bot_kcc_move(
     }
 }
 
+// FSM対応版のBot移動
+fn bot_kcc_move_fsm(
+    time_fixed: Res<Time<Fixed>>,
+    mut bots: ResMut<Bots>,
+    bot_ents: Res<BotEntities>,
+    players: Res<Players>,
+    mut q: Query<&mut KinematicCharacterController>,
+    ready: Res<MapReady>,
+    rapier: Res<RapierContext>,
+    fsm: Res<BotFSM>,
+    wander: Res<BotWander>,
+    mut strafe: ResMut<BotStrafe>,
+    target: Res<BotTarget>,
+) {
+    if !ready.0 { return; }
+    let dt = time_fixed.delta_seconds();
+    for (id, state) in bots.states.iter_mut() {
+        if !state.alive { continue; }
+        let Some(&entity) = bot_ents.0.get(id) else { continue };
+
+        let (st, _timer) = fsm.0.get(id).copied().unwrap_or((BotFsm::Wander, 0.0));
+        let tgt_id = target.0.get(id).and_then(|o| *o);
+
+        let mut face_dir = Vec3::ZERO;
+        let mut fwd = Vec3::ZERO;
+        let mut strafe_vec = Vec3::ZERO;
+
+        match st {
+            BotFsm::Seek | BotFsm::Combat => {
+                if let Some(pid) = tgt_id {
+                    if let Some(p) = players.states.get(&pid) {
+                        let to = (p.pos - state.pos).with_y(0.0);
+                        if to.length_squared() > 1e-6 { face_dir = to.normalize(); }
+                        let dist = state.pos.distance(p.pos);
+                        if dist > BOT_DESIRED_FAR { fwd = face_dir; }
+                        else if dist < BOT_DESIRED_NEAR { fwd = -face_dir; }
+                        else {
+                            let entry = strafe.0.entry(*id).or_insert(((if rand::random::<f32>()<0.5{-1.0}else{1.0}), BOT_STRAFE_SWITCH_SEC));
+                            entry.1 -= dt; if entry.1 <= 0.0 { entry.0 = -entry.0; entry.1 = BOT_STRAFE_SWITCH_SEC; }
+                            let side_raw = Vec3::Y.cross(face_dir);
+                            let side = if side_raw.length_squared() > 1e-6 { side_raw.normalize() } else { Vec3::ZERO };
+                            strafe_vec = side * entry.0;
+                        }
+                    }
+                }
+            }
+            BotFsm::Wander | BotFsm::Lost => {
+                if let Some((dest, _t)) = wander.0.get(id) {
+                    let to = (*dest - state.pos).with_y(0.0);
+                    if to.length_squared() > 1e-6 { face_dir = to.normalize(); fwd = face_dir; }
+                }
+            }
+        }
+
+        // 向き回転
+        if face_dir.length_squared() > 1e-6 {
+            let desired_yaw = face_dir.z.atan2(face_dir.x) + std::f32::consts::FRAC_PI_2;
+            let mut delta = (desired_yaw - state.yaw + std::f32::consts::PI).rem_euclid(2.0*std::f32::consts::PI) - std::f32::consts::PI;
+            delta = delta.clamp(-BOT_TURN_RATE*dt, BOT_TURN_RATE*dt);
+            state.yaw += delta;
+        }
+
+        // 落下防止: 前進成分のみ抑制
+        if fwd.length_squared() > 1e-6 {
+            let cur_up = state.pos + Vec3::Y * 1.0;
+            let ahead = state.pos + fwd.normalize() * BOT_PROBE_AHEAD + Vec3::Y * 1.0;
+            let g_cur = rapier.cast_ray(cur_up, Vec3::NEG_Y, 3.0, true, QueryFilter::default()).map(|(_e,t)| 1.0 - t + state.pos.y);
+            let g_ahead = rapier.cast_ray(ahead, Vec3::NEG_Y, 3.0, true, QueryFilter::default()).map(|(_e,t)| 1.0 - t + state.pos.y);
+            if let (Some(yc), Some(ya)) = (g_cur, g_ahead) {
+                if yc - ya > BOT_MAX_DROP { fwd = Vec3::ZERO; }
+            }
+        }
+
+        let mut horiz = Vec3::ZERO;
+        if fwd.length_squared() > 1e-6 { horiz += fwd.normalize() * BOT_MOVE_SPEED; }
+        if strafe_vec.length_squared() > 1e-6 { horiz += strafe_vec.normalize() * (BOT_MOVE_SPEED * BOT_STRAFE_SPEED_MUL); }
+
+        if let Ok(mut kcc) = q.get_mut(entity) {
+            let vy = state.vy - 9.81 * dt;
+            kcc.translation = Some(horiz * dt + Vec3::Y * vy * dt);
+            state.vy = vy;
+        }
+    }
+}
+
 // Post-physics: update states from transforms/outputs
 fn srv_kcc_post(
     mut players: ResMut<Players>,
@@ -417,6 +644,7 @@ fn bot_kcc_post(
     mut bots: ResMut<Bots>,
     bot_ents: Res<BotEntities>,
     q: Query<(&GlobalTransform, Option<&KinematicCharacterControllerOutput>)>,
+    mut safe: ResMut<BotSafePos>,
 ) {
     for (id, state) in bots.states.iter_mut() {
         let Some(&entity) = bot_ents.0.get(id) else { continue };
@@ -424,7 +652,11 @@ fn bot_kcc_post(
             state.pos = gt.translation();
             if let Some(o) = out {
                 state.grounded = o.grounded;
-                if o.grounded && state.vy <= 0.0 { state.vy = 0.0; }
+                if o.grounded && state.vy <= 0.0 {
+                    state.vy = 0.0;
+                    // 安全位置の更新
+                    safe.0.insert(*id, state.pos);
+                }
             }
         }
     }
@@ -446,11 +678,14 @@ fn bot_ai_shoot_and_respawn(
     bot_ents: Res<BotEntities>,
     mut protect: ResMut<ProtectTimers>,
     mut focus: ResMut<BotFocus>,
+    fsm: Res<BotFSM>,
 ) {
     let dt = time_fixed.delta_seconds();
     // 射撃（Bot→人間のみ、FFなし）
     for (id, b) in bots.states.iter() {
         if !b.alive { continue; }
+        // 発砲はCombat状態のみ
+        if !matches!(fsm.0.get(id).map(|v| v.0), Some(BotFsm::Combat)) { continue; }
         let w = weapons.0.entry(*id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
         if w.reload > 0.0 || w.cooldown > 0.0 { continue; }
         // ボット自身が保護中は発砲不可
