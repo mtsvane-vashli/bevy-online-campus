@@ -260,6 +260,7 @@ fn ensure_bots(
         if let Ok(bytes) = bincode::serialize(&ev) {
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
         }
+        info!("server: spawned bot id={} at ({:.2},{:.2},{:.2})", id, pos.x, pos.y, pos.z);
     }
 }
 
@@ -868,6 +869,9 @@ fn broadcast_snapshots(
         .map(|(id, s)| PlayerStateMsg { id: *id, pos: [s.pos.x, s.pos.y, s.pos.z], yaw: s.yaw, alive: s.alive, hp: s.hp, kind: ActorKind::Human })
         .collect();
     players_vec.extend(bots.states.iter().map(|(id, s)| PlayerStateMsg { id: *id, pos: [s.pos.x, s.pos.y, s.pos.z], yaw: s.yaw, alive: s.alive, hp: s.hp, kind: ActorKind::Bot }));
+    if matches!(std::env::var("NET_SNAPSHOT_LOG").ok(), Some(_)) {
+        info!("server: snapshot actors={}", players_vec.len());
+    }
     let snap = SnapshotMsg { tick: 0, players: players_vec };
     let bytes = bincode::serialize(&ServerMessage::Snapshot(snap)).unwrap();
     for client_id in server.clients_id() {
