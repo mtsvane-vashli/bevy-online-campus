@@ -473,6 +473,11 @@ fn bot_ai_shoot_and_respawn(
             if best.map_or(true, |(_,bt)| t < bt) { best = Some((*pid, t)); }
         }
         if let Some((hit_id, t_hit)) = best {
+            // 目標方向へ直接狙う（yawに依存しない）
+            let target_eye = if let Some(p) = players.states.get(&hit_id) { p.pos + Vec3::new(0.0,0.7,0.0) } else { continue };
+            let to = target_eye - origin;
+            let dist = to.length().max(0.001);
+            let aim_dir = (to / dist).normalize();
             // 反応時間: 同じターゲットに一定時間フォーカスしてから射撃
             let entry = focus.0.entry(*id).or_insert((None, 0.0));
             if entry.0 == Some(hit_id) { entry.1 += dt; } else { *entry = (Some(hit_id), 0.0); }
@@ -482,16 +487,16 @@ fn bot_ai_shoot_and_respawn(
             // Fire event（Bot）: 衝突点をレイで取得
             let mut filter_fire = QueryFilter::default();
             if let Some(&self_ent) = ents.0.get(id) { filter_fire = filter_fire.exclude_collider(self_ent); }
-            let hit_opt = if let Some((_hit_ent, toi)) = rapier.cast_ray(origin, forward, range, true, filter_fire) {
-                Some([origin.x + forward.x * toi, origin.y + forward.y * toi, origin.z + forward.z * toi])
+            let hit_opt = if let Some((_hit_ent, toi)) = rapier.cast_ray(origin, aim_dir, dist, true, filter_fire) {
+                Some([origin.x + aim_dir.x * toi, origin.y + aim_dir.y * toi, origin.z + aim_dir.z * toi])
             } else { None };
-            if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire { id: *id, origin: [origin.x, origin.y, origin.z], dir: [forward.x, forward.y, forward.z], hit: hit_opt })) {
+            if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire { id: *id, origin: [origin.x, origin.y, origin.z], dir: [aim_dir.x, aim_dir.y, aim_dir.z], hit: hit_opt })) {
                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
             }
             // 遮蔽レイ判定（自身は除外）
             let mut filter = QueryFilter::default();
             if let Some(&self_ent) = ents.0.get(id) { filter = filter.exclude_collider(self_ent); }
-            if let Some((hit_ent, _)) = rapier.cast_ray(origin, forward, t_hit, true, filter) {
+            if let Some((hit_ent, _)) = rapier.cast_ray(origin, aim_dir, dist, true, filter) {
                 let target_ent_h = ents.0.get(&hit_id).copied();
                 let target_ent_b = bot_ents.0.get(&hit_id).copied();
                 if Some(hit_ent) != target_ent_h && Some(hit_ent) != target_ent_b { continue; }
