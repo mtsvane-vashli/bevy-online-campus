@@ -5,6 +5,7 @@ use bevy::app::ScheduleRunnerPlugin; // Winit を無効化したらループ駆�
 use std::time::Duration;
 use std::env;
 use bevy::time::Fixed;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::Name;
 use bevy_rapier3d::prelude::*;
 use bevy_renet::renet::{ClientId, RenetServer};
@@ -52,6 +53,18 @@ struct BotRespawnTimers(HashMap<u64, f32>);
 
 #[derive(Resource)]
 struct NextBotId(u64);
+
+#[derive(Resource, Default)]
+struct ProtectTimers(HashMap<u64, f32>);
+
+#[derive(Resource, Default)]
+struct BotFocus(HashMap<u64, (Option<u64>, f32)>); // (target_id, lock_time)
+
+#[derive(SystemParam)]
+struct WpnProt<'w> {
+    weapons: ResMut<'w, Weapons>,
+    protect: ResMut<'w, ProtectTimers>,
+}
 
 #[derive(Resource, Default)]
 struct LastInputs(HashMap<u64, InputFrame>);
@@ -106,8 +119,17 @@ const BOT_SPAWN_COOLDOWN: f32 = 2.0;
 const BOT_ID_START: u64 = 1_000_000_000_000; // 衝突低確率な帯を使用
 const BOT_MOVE_SPEED: f32 = 5.5;
 const BOT_FIRE_RANGE: f32 = 60.0;
-const BOT_FOV_COS: f32 = 0.2; // 約78度
+const BOT_FOV_COS: f32 = 0.5; // 約60度（厳しめに）
 const BOT_TURN_RATE: f32 = 6.0; // rad/s: 向き直り速度
+const BOT_REACT_SEC: f32 = 0.25; // 目標を捉えてから撃つまでの反応時間
+const BOT_FIRE_COOLDOWN: f32 = 0.18; // 連射間隔
+const BOT_DMG: u16 = 20; // botの与ダメージ
+const BOT_SPREAD_BASE: f32 = 0.015; // 基本拡散（ラジアン）
+const BOT_SPREAD_DIST_K: f32 = 0.01; // 距離による拡散増加
+const BOT_AIRBORNE_SPREAD_MUL: f32 = 1.5; // 空中ターゲット拡散倍率
+
+const SPAWN_JITTER_RADIUS: f32 = 6.0; // スポーン分散半径
+const PROTECT_SEC: f32 = 2.0; // リスポーン保護（無敵・発砲不可）
 
 fn main() {
     App::new()
@@ -141,6 +163,8 @@ fn main() {
         .insert_resource(BotEntities::default())
         .insert_resource(BotRespawnTimers::default())
         .insert_resource(NextBotId(BOT_ID_START))
+        .insert_resource(ProtectTimers::default())
+        .insert_resource(BotFocus::default())
         .insert_resource(MapReady(false))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(SnapshotTimer(Timer::from_seconds(1.0/30.0, TimerMode::Repeating)))
@@ -176,12 +200,16 @@ fn accept_clients(
     round: Res<RoundState>,
     spawns: Res<SpawnPoints>,
     mut weapons: ResMut<Weapons>,
+    mut protect: ResMut<ProtectTimers>,
 ) {
     while let Some(event) = server.get_event() {
         match event {
             bevy_renet::renet::ServerEvent::ClientConnected { client_id } => {
                 let id = client_id.raw();
-                let spawn = choose_spawn_point(&spawns, &players);
+                let mut spawn = choose_spawn_point(&spawns, &players);
+                // スポーン分散ジッター
+                let jitter = Vec3::new((rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS, 0.0, (rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS);
+                spawn += jitter;
                 players.states.insert(id, PlayerState { pos: spawn, yaw: 0.0, hp: 100, alive: true, vy: 0.0, grounded: true });
                 let ent = commands.spawn((
                     TransformBundle::from_transform(Transform::from_translation(spawn)),
@@ -197,7 +225,9 @@ fn accept_clients(
                 scores.0.entry(id).or_insert((0,0));
                 weapons.0.insert(id, WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: MAG_SIZE, reloading: false })) { let _ = server.send_message(client_id, CH_RELIABLE, bytes); }
-                info!("client connected: {}", id);
+                // スポーン保護
+                protect.0.insert(id, PROTECT_SEC);
+                info!("client connected: {} (protect {:.1}s)", id, PROTECT_SEC);
                 // 現在のラウンド残り時間を通知
                 let ev = ServerMessage::Event(EventMsg::RoundStart { time_left_sec: round.time_left.max(0.0) as u32 });
                 if let Ok(bytes) = bincode::serialize(&ev) { let _ = server.send_message(client_id, CH_RELIABLE, bytes); }
@@ -236,6 +266,7 @@ fn ensure_bots(
     spawns: Res<SpawnPoints>,
     _players: Res<Players>,
     mut server: ResMut<RenetServer>,
+    mut protect: ResMut<ProtectTimers>,
 ) {
     // 既に規定数いれば何もしない
     if bots.states.len() >= DESIRED_BOTS { return; }
@@ -245,7 +276,7 @@ fn ensure_bots(
         let id = { let cur = next_id.0; next_id.0 += 1; cur };
         let mut pos = base_pos;
         // 少し散らす
-        let jitter = Vec3::new((rand::random::<f32>()-0.5)*4.0, 0.0, (rand::random::<f32>()-0.5)*4.0);
+        let jitter = Vec3::new((rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS, 0.0, (rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS);
         pos += jitter;
         bots.states.insert(id, BotState { pos, yaw: 0.0, hp: 100, alive: true, vy: 0.0, grounded: true });
         let ent = commands.spawn((
@@ -256,6 +287,8 @@ fn ensure_bots(
         bot_ents.0.insert(id, ent);
         ents.0.insert(id, ent); // レイ判定用に共通Mapにも入れておく
         weapons.0.insert(id, WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
+        // 保護
+        protect.0.insert(id, PROTECT_SEC);
         // Spawnイベント（Bot）
         let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [pos.x, pos.y, pos.z], kind: ActorKind::Bot });
         if let Ok(bytes) = bincode::serialize(&ev) {
@@ -411,6 +444,8 @@ fn bot_ai_shoot_and_respawn(
     mut respawns_bots: ResMut<BotRespawnTimers>,
     spawns: Res<SpawnPoints>,
     bot_ents: Res<BotEntities>,
+    mut protect: ResMut<ProtectTimers>,
+    mut focus: ResMut<BotFocus>,
 ) {
     let dt = time_fixed.delta_seconds();
     // 射撃（Bot→人間のみ、FFなし）
@@ -418,6 +453,8 @@ fn bot_ai_shoot_and_respawn(
         if !b.alive { continue; }
         let w = weapons.0.entry(*id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
         if w.reload > 0.0 || w.cooldown > 0.0 { continue; }
+        // ボット自身が保護中は発砲不可
+        if protect.0.get(id).copied().unwrap_or(0.0) > 0.0 { continue; }
         if w.ammo == 0 { w.reload = RELOAD_TIME; continue; }
         // 索敵
         let origin = b.pos + Vec3::new(0.0, 0.7, 0.0);
@@ -436,6 +473,12 @@ fn bot_ai_shoot_and_respawn(
             if best.map_or(true, |(_,bt)| t < bt) { best = Some((*pid, t)); }
         }
         if let Some((hit_id, t_hit)) = best {
+            // 反応時間: 同じターゲットに一定時間フォーカスしてから射撃
+            let entry = focus.0.entry(*id).or_insert((None, 0.0));
+            if entry.0 == Some(hit_id) { entry.1 += dt; } else { *entry = (Some(hit_id), 0.0); }
+            if entry.1 < BOT_REACT_SEC { continue; }
+            // 保護中の対象は無効
+            if protect.0.get(&hit_id).copied().unwrap_or(0.0) > 0.0 { continue; }
             // Fire event（Bot）: 衝突点をレイで取得
             let mut filter_fire = QueryFilter::default();
             if let Some(&self_ent) = ents.0.get(id) { filter_fire = filter_fire.exclude_collider(self_ent); }
@@ -449,14 +492,15 @@ fn bot_ai_shoot_and_respawn(
             let mut filter = QueryFilter::default();
             if let Some(&self_ent) = ents.0.get(id) { filter = filter.exclude_collider(self_ent); }
             if let Some((hit_ent, _)) = rapier.cast_ray(origin, forward, t_hit, true, filter) {
-                let target_ent = ents.0.get(&hit_id).copied();
-                if Some(hit_ent) != target_ent { continue; }
+                let target_ent_h = ents.0.get(&hit_id).copied();
+                let target_ent_b = bot_ents.0.get(&hit_id).copied();
+                if Some(hit_ent) != target_ent_h && Some(hit_ent) != target_ent_b { continue; }
             }
             if let Some(hit) = players.states.get(&hit_id) {
                 // ダメージ適用（読み取り→書き込みのためクローンIDで再参照）
                 drop(hit);
                 if let Some(hitm) = players.states.get_mut(&hit_id) {
-                    let dmg = 25u16;
+                    let dmg = BOT_DMG;
                     if hitm.alive {
                         hitm.hp = hitm.hp.saturating_sub(dmg);
                         let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hitm.hp, by: *id });
@@ -476,6 +520,9 @@ fn bot_ai_shoot_and_respawn(
                 w.ammo = w.ammo.saturating_sub(1);
                 w.cooldown = FIRE_COOLDOWN;
             }
+            // 弾消費とクールダウン（Bot用）
+            w.ammo = w.ammo.saturating_sub(1);
+            w.cooldown = BOT_FIRE_COOLDOWN;
         }
     }
     // Botリスポーン
@@ -484,7 +531,10 @@ fn bot_ai_shoot_and_respawn(
     for bid in to_spawn {
         respawns_bots.0.remove(&bid);
         if let Some(b) = bots.states.get_mut(&bid) {
-            let spawn = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { Vec3::new(0.0, 10.0, 5.0) };
+            let mut spawn = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { Vec3::new(0.0, 10.0, 5.0) };
+            // ジッターで分散
+            let jitter = Vec3::new((rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS, 0.0, (rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS);
+            spawn += jitter;
             b.alive = true; b.hp = 100; b.pos = spawn; b.vy = 0.0; b.grounded = true;
             if let Some(&e) = bot_ents.0.get(&bid) {
                 commands.entity(e).insert(TransformBundle::from_transform(Transform::from_translation(spawn)));
@@ -494,6 +544,8 @@ fn bot_ai_shoot_and_respawn(
             // 武器リセット
             let w = weapons.0.entry(bid).or_insert(WeaponStatus::default());
             *w = WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 };
+            // 保護付与
+            protect.0.insert(bid, PROTECT_SEC);
         }
     }
 }
@@ -514,12 +566,12 @@ fn srv_shoot_and_respawn(
     mut scores: ResMut<Scores>,
     round: Res<RoundState>,
     spawns: Res<SpawnPoints>,
-    mut weapons: ResMut<Weapons>,
+    mut wpnprot: WpnProt,
 ) {
     if round.phase != RoundPhase::Active { return; }
     let dt = time_fixed.delta_seconds();
     // tick weapon timers
-    for (id, w) in weapons.0.iter_mut() {
+    for (id, w) in wpnprot.weapons.0.iter_mut() {
         if w.cooldown > 0.0 { w.cooldown = (w.cooldown - dt).max(0.0); }
         if w.reload > 0.0 {
             w.reload = (w.reload - dt).max(0.0);
@@ -542,12 +594,14 @@ fn srv_shoot_and_respawn(
 
     for (id, pos, alive) in snap.iter().copied() {
         let Some(inp) = last.0.get(&id) else { continue };
-        let w = weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
+        let w = wpnprot.weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
         let last_seq = last_fire.0.entry(id).or_insert(0);
         if inp.fire && inp.seq != *last_seq && alive {
             *last_seq = inp.seq;
             // Can fire?
             if w.reload > 0.0 || w.cooldown > 0.0 { continue; }
+            // 保護中は発砲不可
+            if wpnprot.protect.0.get(&id).copied().unwrap_or(0.0) > 0.0 { continue; }
             if w.ammo == 0 {
                 // start reload
                 if w.reload <= 0.0 { w.reload = RELOAD_TIME; }
@@ -588,6 +642,8 @@ fn srv_shoot_and_respawn(
                 }
             }
             if let Some((hit_id, t_hit)) = best {
+                // 保護中の対象は無効
+                if wpnprot.protect.0.get(&hit_id).copied().unwrap_or(0.0) > 0.0 { continue; }
                 // 射線上の障害物チェック（自分自身のコライダーは除外）
                 let mut filter = QueryFilter::default();
                 if let Some(&self_ent) = ents.0.get(&id) { filter = filter.exclude_collider(self_ent); }
@@ -618,7 +674,7 @@ fn srv_shoot_and_respawn(
                                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                             }
                             // auto reload on kill if empty and not already reloading
-                            let ww = weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
+                            let ww = wpnprot.weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
                             if ww.ammo == 0 && ww.reload <= 0.0 {
                                 ww.reload = RELOAD_TIME;
                                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: ww.ammo, reloading: true })) {
@@ -646,6 +702,8 @@ fn srv_shoot_and_respawn(
             }
         }
     }
+    // 保護タイマー更新
+    for t in wpnprot.protect.0.values_mut() { if *t > 0.0 { *t = (*t - dt).max(0.0); } }
     // respawn countdown
     let mut to_spawn = Vec::new();
     for (pid, t) in respawns.0.iter_mut() {
@@ -664,12 +722,14 @@ fn srv_shoot_and_respawn(
             if let Some(&e) = ents.0.get(&pid) {
                 commands.entity(e).insert(TransformBundle::from_transform(Transform::from_translation(spawn)));
             }
+            // リスポーン保護
+            wpnprot.protect.0.insert(pid, PROTECT_SEC);
             let ev = ServerMessage::Event(EventMsg::Spawn { id: pid, pos: [p.pos.x, p.pos.y, p.pos.z], kind: ActorKind::Human });
             let bytes = bincode::serialize(&ev).unwrap();
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
         }
         // reset weapon
-        let w = weapons.0.entry(pid).or_insert(WeaponStatus::default());
+        let w = wpnprot.weapons.0.entry(pid).or_insert(WeaponStatus::default());
         *w = WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 };
         if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id: pid, ammo: MAG_SIZE, reloading: false })) {
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
