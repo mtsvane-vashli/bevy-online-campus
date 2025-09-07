@@ -30,6 +30,29 @@ struct PlayerState {
     grounded: bool,
 }
 
+// --- Bots ---
+#[derive(Default, Clone, Copy)]
+struct BotState {
+    pos: Vec3,
+    yaw: f32,
+    hp: u16,
+    alive: bool,
+    vy: f32,
+    grounded: bool,
+}
+
+#[derive(Resource, Default)]
+struct Bots { states: HashMap<u64, BotState> }
+
+#[derive(Resource, Default)]
+struct BotEntities(HashMap<u64, Entity>);
+
+#[derive(Resource, Default)]
+struct BotRespawnTimers(HashMap<u64, f32>);
+
+#[derive(Resource)]
+struct NextBotId(u64);
+
 #[derive(Resource, Default)]
 struct LastInputs(HashMap<u64, InputFrame>);
 
@@ -78,6 +101,13 @@ struct WeaponStatus { ammo: u16, cooldown: f32, reload: f32 }
 #[derive(Resource, Default)]
 struct Weapons(HashMap<u64, WeaponStatus>);
 
+const DESIRED_BOTS: usize = 5;
+const BOT_SPAWN_COOLDOWN: f32 = 2.0;
+const BOT_ID_START: u64 = 1_000_000_000_000; // 衝突低確率な帯を使用
+const BOT_MOVE_SPEED: f32 = 5.5;
+const BOT_FIRE_RANGE: f32 = 60.0;
+const BOT_FOV_COS: f32 = 0.2; // 約78度
+
 fn main() {
     App::new()
         // ヘッドレス運用: WinitPlugin（X/Wayland依存のイベントループ）を無効化
@@ -106,18 +136,25 @@ fn main() {
         .insert_resource(JumpCounts::default())
         .insert_resource(Weapons::default())
         .insert_resource(ServerEntities::default())
+        .insert_resource(Bots::default())
+        .insert_resource(BotEntities::default())
+        .insert_resource(BotRespawnTimers::default())
+        .insert_resource(NextBotId(BOT_ID_START))
         .insert_resource(MapReady(false))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(SnapshotTimer(Timer::from_seconds(1.0/30.0, TimerMode::Repeating)))
         .insert_resource(ServerLogTimer(Timer::from_seconds(1.0, TimerMode::Repeating)))
         .add_systems(Startup, (setup_server, setup_map))
-        .add_systems(Update, (accept_clients, add_mesh_colliders_for_map, collect_spawn_points_from_map, log_clients_count))
+        .add_systems(Update, (accept_clients, add_mesh_colliders_for_map, collect_spawn_points_from_map, ensure_bots, log_clients_count))
         .add_systems(Update, sync_players_with_connections)
         .add_systems(FixedUpdate, recv_inputs)
         .add_systems(FixedUpdate, srv_kcc_move.before(PhysicsSet::StepSimulation))
+        .add_systems(FixedUpdate, bot_kcc_move.before(PhysicsSet::StepSimulation))
         .add_systems(FixedUpdate, srv_kcc_post.after(PhysicsSet::Writeback))
+        .add_systems(FixedUpdate, bot_kcc_post.after(PhysicsSet::Writeback))
         .add_systems(FixedUpdate, srv_shoot_and_respawn.after(srv_kcc_post))
-        .add_systems(FixedUpdate, broadcast_snapshots.after(srv_shoot_and_respawn))
+        .add_systems(FixedUpdate, bot_ai_shoot_and_respawn.after(srv_shoot_and_respawn))
+        .add_systems(FixedUpdate, broadcast_snapshots.after(bot_ai_shoot_and_respawn))
         .add_systems(FixedUpdate, round_update.after(broadcast_snapshots))
         .run();
 }
@@ -153,7 +190,7 @@ fn accept_clients(
                 ents.0.insert(id, ent);
                 info!("server: inserted player state for {} (total={})", id, players.states.len());
                 // broadcast spawn
-                let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z] });
+                let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z], kind: ActorKind::Human });
                 let bytes = bincode::serialize(&ev).unwrap();
                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                 scores.0.entry(id).or_insert((0,0));
@@ -183,6 +220,47 @@ const MAP_SCENE_PATH: &str = "maps/map.glb#Scene0";
 
 fn setup_map(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(SceneBundle { scene: asset_server.load(MAP_SCENE_PATH), ..default() });
+}
+
+fn is_human_id(players: &Players, id: u64) -> bool { players.states.contains_key(&id) }
+fn is_bot_id(bots: &Bots, id: u64) -> bool { bots.states.contains_key(&id) }
+
+fn ensure_bots(
+    mut commands: Commands,
+    mut bots: ResMut<Bots>,
+    mut bot_ents: ResMut<BotEntities>,
+    mut ents: ResMut<ServerEntities>,
+    mut next_id: ResMut<NextBotId>,
+    mut weapons: ResMut<Weapons>,
+    spawns: Res<SpawnPoints>,
+    _players: Res<Players>,
+    mut server: ResMut<RenetServer>,
+) {
+    // 既に規定数いれば何もしない
+    if bots.states.len() >= DESIRED_BOTS { return; }
+    // スポーン位置
+    let base_pos = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { Vec3::new(0.0, 10.0, 5.0) };
+    while bots.states.len() < DESIRED_BOTS {
+        let id = { let cur = next_id.0; next_id.0 += 1; cur };
+        let mut pos = base_pos;
+        // 少し散らす
+        let jitter = Vec3::new((rand::random::<f32>()-0.5)*4.0, 0.0, (rand::random::<f32>()-0.5)*4.0);
+        pos += jitter;
+        bots.states.insert(id, BotState { pos, yaw: 0.0, hp: 100, alive: true, vy: 0.0, grounded: true });
+        let ent = commands.spawn((
+            TransformBundle::from_transform(Transform::from_translation(pos)),
+            Collider::capsule_y(0.6, 0.3),
+            KinematicCharacterController::default(),
+        )).id();
+        bot_ents.0.insert(id, ent);
+        ents.0.insert(id, ent); // レイ判定用に共通Mapにも入れておく
+        weapons.0.insert(id, WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
+        // Spawnイベント（Bot）
+        let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [pos.x, pos.y, pos.z], kind: ActorKind::Bot });
+        if let Ok(bytes) = bincode::serialize(&ev) {
+            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+        }
+    }
 }
 
 fn recv_inputs(mut server: ResMut<RenetServer>, mut last: ResMut<LastInputs>) {
@@ -237,6 +315,45 @@ fn srv_kcc_move(
     }
 }
 
+fn bot_kcc_move(
+    time_fixed: Res<Time<Fixed>>,
+    mut bots: ResMut<Bots>,
+    bot_ents: Res<BotEntities>,
+    players: Res<Players>,
+    mut q: Query<&mut KinematicCharacterController>,
+    ready: Res<MapReady>,
+) {
+    if !ready.0 { return; }
+    let dt = time_fixed.delta_seconds();
+    for (id, state) in bots.states.iter_mut() {
+        if !state.alive { continue; }
+        let Some(&entity) = bot_ents.0.get(id) else { continue };
+        // find nearest player
+        let mut target_dir = Vec3::ZERO;
+        let mut best_d2 = f32::INFINITY;
+        for (_pid, p) in players.states.iter() {
+            if !p.alive { continue; }
+            let d2 = p.pos.distance_squared(state.pos);
+            if d2 < best_d2 { best_d2 = d2; target_dir = (p.pos - state.pos).with_y(0.0); }
+        }
+        if target_dir.length_squared() > 1e-6 {
+            let dir = target_dir.normalize();
+            let desired_yaw = dir.z.atan2(dir.x) + std::f32::consts::FRAC_PI_2;
+            let dy = (desired_yaw - state.yaw).atan2(1.0).clamp(-3.0*dt, 3.0*dt);
+            state.yaw += dy;
+            if let Ok(mut kcc) = q.get_mut(entity) {
+                let vy = state.vy - 9.81 * dt;
+                kcc.translation = Some(dir * BOT_MOVE_SPEED * dt + Vec3::Y * vy * dt);
+                state.vy = vy;
+            }
+        } else if let Ok(mut kcc) = q.get_mut(entity) {
+            let vy = state.vy - 9.81 * dt;
+            kcc.translation = Some(Vec3::Y * vy * dt);
+            state.vy = vy;
+        }
+    }
+}
+
 // Post-physics: update states from transforms/outputs
 fn srv_kcc_post(
     mut players: ResMut<Players>,
@@ -259,15 +376,126 @@ fn srv_kcc_post(
     }
 }
 
-fn srv_shoot_and_respawn(
+fn bot_kcc_post(
+    mut bots: ResMut<Bots>,
+    bot_ents: Res<BotEntities>,
+    q: Query<(&GlobalTransform, Option<&KinematicCharacterControllerOutput>)>,
+) {
+    for (id, state) in bots.states.iter_mut() {
+        let Some(&entity) = bot_ents.0.get(id) else { continue };
+        if let Ok((gt, out)) = q.get(entity) {
+            state.pos = gt.translation();
+            if let Some(o) = out {
+                state.grounded = o.grounded;
+                if o.grounded && state.vy <= 0.0 { state.vy = 0.0; }
+            }
+        }
+    }
+}
+
+fn bot_ai_shoot_and_respawn(
     time_fixed: Res<Time<Fixed>>,
     mut players: ResMut<Players>,
-    last: Res<LastInputs>,
-    mut last_fire: ResMut<LastFireSeq>,
-    mut respawns: ResMut<RespawnTimers>,
+    mut bots: ResMut<Bots>,
+    mut weapons: ResMut<Weapons>,
     mut server: ResMut<RenetServer>,
     rapier: Res<RapierContext>,
     ents: Res<ServerEntities>,
+    mut scores: ResMut<Scores>,
+    mut respawns_players: ResMut<RespawnTimers>,
+    mut respawns_bots: ResMut<BotRespawnTimers>,
+    spawns: Res<SpawnPoints>,
+) {
+    let dt = time_fixed.delta_seconds();
+    // 射撃（Bot→人間のみ、FFなし）
+    for (id, b) in bots.states.iter() {
+        if !b.alive { continue; }
+        let w = weapons.0.entry(*id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
+        if w.reload > 0.0 || w.cooldown > 0.0 { continue; }
+        if w.ammo == 0 { w.reload = RELOAD_TIME; continue; }
+        // 索敵
+        let origin = b.pos + Vec3::new(0.0, 0.7, 0.0);
+        let forward = Quat::from_rotation_y(b.yaw) * Vec3::NEG_Z;
+        let range = BOT_FIRE_RANGE;
+        let mut best: Option<(u64, f32)> = None;
+        for (pid, p) in players.states.iter() {
+            if !p.alive { continue; }
+            let to = (p.pos + Vec3::new(0.0,0.7,0.0)) - origin;
+            let dist = to.length();
+            if dist > range { continue; }
+            let cos = forward.normalize().dot(to.normalize());
+            if cos < BOT_FOV_COS { continue; }
+            // 横ずれ距離
+            let t = to.dot(forward).clamp(0.0, range);
+            let closest = origin + forward * t;
+            let dist2 = (p.pos + Vec3::new(0.0,0.7,0.0) - closest).length_squared();
+            if dist2 <= 0.35*0.35 {
+                if best.map_or(true, |(_,bt)| t < bt) { best = Some((*pid, t)); }
+            }
+        }
+        if let Some((hit_id, t_hit)) = best {
+            // 遮蔽レイ判定（自身は除外）
+            let mut filter = QueryFilter::default();
+            if let Some(&self_ent) = ents.0.get(id) { filter = filter.exclude_collider(self_ent); }
+            if let Some((hit_ent, _)) = rapier.cast_ray(origin, forward, t_hit, true, filter) {
+                let target_ent = ents.0.get(&hit_id).copied();
+                if Some(hit_ent) != target_ent { continue; }
+            }
+            if let Some(hit) = players.states.get(&hit_id) {
+                // ダメージ適用（読み取り→書き込みのためクローンIDで再参照）
+                drop(hit);
+                if let Some(hitm) = players.states.get_mut(&hit_id) {
+                    let dmg = 25u16;
+                    if hitm.alive {
+                        hitm.hp = hitm.hp.saturating_sub(dmg);
+                        let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hitm.hp, by: *id });
+                        if let Ok(bytes) = bincode::serialize(&ev) { for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+                        if hitm.hp == 0 {
+                            let mut_dead = players.states.get_mut(&hit_id).unwrap();
+                            mut_dead.alive = false;
+                            let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: *id });
+                            if let Ok(bytes) = bincode::serialize(&ev) { for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+                            respawns_players.0.insert(hit_id, 2.0);
+                            // スコアは人間のみ集計（Botのキルは加算しないがデスは加算）
+                            let e2 = scores.0.entry(hit_id).or_insert((0,0)); e2.1 = e2.1.saturating_add(1);
+                        }
+                    }
+                }
+                // 射撃消費
+                w.ammo = w.ammo.saturating_sub(1);
+                w.cooldown = FIRE_COOLDOWN;
+            }
+        }
+    }
+    // Botリスポーン
+    let mut to_spawn = Vec::new();
+    for (bid, t) in respawns_bots.0.iter_mut() { *t -= dt; if *t <= 0.0 { to_spawn.push(*bid); } }
+    for bid in to_spawn {
+        respawns_bots.0.remove(&bid);
+        if let Some(b) = bots.states.get_mut(&bid) {
+            let spawn = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { Vec3::new(0.0, 10.0, 5.0) };
+            b.alive = true; b.hp = 100; b.pos = spawn; b.vy = 0.0; b.grounded = true;
+            let ev = ServerMessage::Event(EventMsg::Spawn { id: bid, pos: [spawn.x, spawn.y, spawn.z], kind: ActorKind::Bot });
+            if let Ok(bytes) = bincode::serialize(&ev) { for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+            // 武器リセット
+            let w = weapons.0.entry(bid).or_insert(WeaponStatus::default());
+            *w = WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 };
+        }
+    }
+}
+
+fn srv_shoot_and_respawn(
+    time_fixed: Res<Time<Fixed>>,
+    mut players: ResMut<Players>,
+    mut bots: ResMut<Bots>,
+    last: Res<LastInputs>,
+    mut last_fire: ResMut<LastFireSeq>,
+    mut respawns: ResMut<RespawnTimers>,
+    mut bot_respawns: ResMut<BotRespawnTimers>,
+    mut server: ResMut<RenetServer>,
+    rapier: Res<RapierContext>,
+    ents: Res<ServerEntities>,
+    bot_ents: Res<BotEntities>,
     mut scores: ResMut<Scores>,
     round: Res<RoundState>,
     spawns: Res<SpawnPoints>,
@@ -356,9 +584,9 @@ fn srv_shoot_and_respawn(
                             let bytes = bincode::serialize(&ev).unwrap();
                             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                             respawns.0.insert(hit_id, 2.0);
-                            // update scores and broadcast
-                            let e = scores.0.entry(id).or_insert((0,0)); e.0 = e.0.saturating_add(1);
-                            let e2 = scores.0.entry(hit_id).or_insert((0,0)); e2.1 = e2.1.saturating_add(1);
+                            // update scores and broadcast（人間のみスコア集計）
+                            if players.states.contains_key(&id) { let e = scores.0.entry(id).or_insert((0,0)); e.0 = e.0.saturating_add(1); }
+                            if players.states.contains_key(&hit_id) { let e2 = scores.0.entry(hit_id).or_insert((0,0)); e2.1 = e2.1.saturating_add(1); }
                             let table: Vec<ScoreEntry> = scores.0.iter().map(|(id,(k,d))| ScoreEntry{ id:*id, kills:*k as u32, deaths:*d as u32}).collect();
                             if let Ok(bytes) = bincode::serialize(&ServerMessage::Score(table)) {
                                 for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
@@ -371,6 +599,21 @@ fn srv_shoot_and_respawn(
                                     for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                                 }
                             }
+                        }
+                    }
+                } else if let Some(hit) = bots.states.get_mut(&hit_id) {
+                    if hit.alive {
+                        let dmg = 35u16;
+                        hit.hp = hit.hp.saturating_sub(dmg);
+                        let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id });
+                        let bytes = bincode::serialize(&ev).unwrap();
+                        for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                        if hit.hp == 0 {
+                            hit.alive = false;
+                            let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id });
+                            let bytes = bincode::serialize(&ev).unwrap();
+                            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                            bot_respawns.0.insert(hit_id, 2.0);
                         }
                     }
                 }
@@ -392,7 +635,7 @@ fn srv_shoot_and_respawn(
             p.pos = spawn;
             p.vy = 0.0;
             p.grounded = true;
-            let ev = ServerMessage::Event(EventMsg::Spawn { id: pid, pos: [p.pos.x, p.pos.y, p.pos.z] });
+            let ev = ServerMessage::Event(EventMsg::Spawn { id: pid, pos: [p.pos.x, p.pos.y, p.pos.z], kind: ActorKind::Human });
             let bytes = bincode::serialize(&ev).unwrap();
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
         }
@@ -453,7 +696,7 @@ fn sync_players_with_connections(
             )).id();
             ents.0.insert(id, ent);
             info!("server: sync add player {} (total={})", id, players.states.len());
-            let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z] });
+            let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z], kind: ActorKind::Human });
             let bytes = bincode::serialize(&ev).unwrap();
             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
             scores.0.entry(id).or_insert((0,0));
@@ -578,7 +821,7 @@ fn round_update(
                         state.grounded = true;
                         if let Some(j) = jumps.0.get_mut(&id) { *j = 0; }
                         // 送信
-                        let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [state.pos.x, state.pos.y, state.pos.z] });
+                        let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [state.pos.x, state.pos.y, state.pos.z], kind: ActorKind::Human });
                         if let Ok(bytes) = bincode::serialize(&ev) {
                             for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                         }
@@ -615,13 +858,17 @@ fn broadcast_snapshots(
     mut timer: ResMut<SnapshotTimer>,
     mut server: ResMut<RenetServer>,
     players: Res<Players>,
+    bots: Res<Bots>,
 ) {
     timer.0.tick(time_fixed.delta());
     if !timer.0.finished() { return; }
-    let snap = SnapshotMsg {
-        tick: 0,
-        players: players.states.iter().map(|(id, s)| PlayerStateMsg { id: *id, pos: [s.pos.x, s.pos.y, s.pos.z], yaw: s.yaw, alive: s.alive, hp: s.hp }).collect(),
-    };
+    let mut players_vec: Vec<PlayerStateMsg> = players
+        .states
+        .iter()
+        .map(|(id, s)| PlayerStateMsg { id: *id, pos: [s.pos.x, s.pos.y, s.pos.z], yaw: s.yaw, alive: s.alive, hp: s.hp, kind: ActorKind::Human })
+        .collect();
+    players_vec.extend(bots.states.iter().map(|(id, s)| PlayerStateMsg { id: *id, pos: [s.pos.x, s.pos.y, s.pos.z], yaw: s.yaw, alive: s.alive, hp: s.hp, kind: ActorKind::Bot }));
+    let snap = SnapshotMsg { tick: 0, players: players_vec };
     let bytes = bincode::serialize(&ServerMessage::Snapshot(snap)).unwrap();
     for client_id in server.clients_id() {
         let _ = server.send_message(client_id, CH_SNAPSHOT, bytes.clone());

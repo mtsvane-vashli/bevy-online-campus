@@ -30,6 +30,7 @@ pub struct PlayerStateMsg {
     pub yaw: f32,
     pub alive: bool,
     pub hp: u16,
+    pub kind: ActorKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +53,7 @@ pub enum ServerMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventMsg {
-    Spawn { id: u64, pos: [f32; 3] },
+    Spawn { id: u64, pos: [f32; 3], kind: ActorKind },
     Despawn { id: u64 },
     Hit { target_id: u64, new_hp: u16, by: u64 },
     Death { target_id: u64, by: u64 },
@@ -63,6 +64,9 @@ pub enum EventMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoreEntry { pub id: u64, pub kills: u32, pub deaths: u32 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
+pub enum ActorKind { Human, Bot }
 
 pub fn connection_config() -> ConnectionConfig { ConnectionConfig::default() }
 
