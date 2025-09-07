@@ -532,12 +532,13 @@ fn srv_shoot_and_respawn(
             }
         }
     }
-    // immutable snapshot of states for safe iteration
-    let snap: Vec<(u64, Vec3, bool)> = players
+    // immutable snapshot of states for safe iteration (humans + bots)
+    let mut snap: Vec<(u64, Vec3, bool)> = players
         .states
         .iter()
         .map(|(id, s)| (*id, s.pos, s.alive))
         .collect();
+    snap.extend(bots.states.iter().map(|(id, s)| (*id, s.pos, s.alive)));
 
     for (id, pos, alive) in snap.iter().copied() {
         let Some(inp) = last.0.get(&id) else { continue };
