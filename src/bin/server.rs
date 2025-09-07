@@ -114,7 +114,7 @@ struct WeaponStatus { ammo: u16, cooldown: f32, reload: f32 }
 #[derive(Resource, Default)]
 struct Weapons(HashMap<u64, WeaponStatus>);
 
-const DESIRED_BOTS: usize = 5;
+const DESIRED_BOTS: usize = 1;
 const BOT_SPAWN_COOLDOWN: f32 = 2.0;
 const BOT_ID_START: u64 = 1_000_000_000_000; // 衝突低確率な帯を使用
 const BOT_MOVE_SPEED: f32 = 5.5;
@@ -123,7 +123,7 @@ const BOT_FOV_COS: f32 = 0.5; // 約60度（厳しめに）
 const BOT_TURN_RATE: f32 = 6.0; // rad/s: 向き直り速度
 const BOT_REACT_SEC: f32 = 0.25; // 目標を捉えてから撃つまでの反応時間
 const BOT_FIRE_COOLDOWN: f32 = 0.18; // 連射間隔
-const BOT_DMG: u16 = 20; // botの与ダメージ
+const BOT_DMG: u16 = 1; // botの与ダメージ（デバッグ用に弱体化）
 const BOT_SPREAD_BASE: f32 = 0.015; // 基本拡散（ラジアン）
 const BOT_SPREAD_DIST_K: f32 = 0.01; // 距離による拡散増加
 const BOT_AIRBORNE_SPREAD_MUL: f32 = 1.5; // 空中ターゲット拡散倍率
