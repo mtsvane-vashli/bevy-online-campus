@@ -349,7 +349,7 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle {
             text: Text::from_section(
-                "✕",
+                "x",
                 TextStyle { font_size: 40.0, color: Color::srgba(0.0, 0.0, 0.0, 0.0), ..default() },
             ),
             style: Style { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), ..default() },
