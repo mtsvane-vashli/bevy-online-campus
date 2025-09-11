@@ -118,6 +118,19 @@ struct Controller {
 #[derive(Resource, Default)]
 struct MapReady(pub bool);
 
+// ===== Scaffold (temporary platform) =====
+const SCAFFOLD_SIZE: Vec3 = Vec3::new(2.0, 0.5, 2.0); // WxHxD (meters)
+const SCAFFOLD_RANGE: f32 = 5.0; // meters
+const SCAFFOLD_HP: i32 = 150;
+const SCAFFOLD_LIFETIME: f32 = 10.0; // seconds
+const SCAFFOLD_PER_PLAYER_LIMIT: usize = 3;
+
+#[derive(Component)]
+struct Scaffold { hp: i32, life: Timer, owner: u64 }
+
+#[derive(Resource, Default)]
+struct LocalScaffolds(Vec<Entity>); // FIFO 管理（ローカルプレイヤー用）
+
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
@@ -128,6 +141,7 @@ fn main() {
         .insert_resource(FpsTextTimer(Timer::from_seconds(0.5, TimerMode::Repeating)))
         .insert_resource(ActorKindsMap::default())
         .insert_resource(ActorPositions::default())
+        .insert_resource(LocalScaffolds::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Bevy FPS".into(),
@@ -164,8 +178,9 @@ fn main() {
             hud_tick_killlog,
             hud_update_ammo,
             fps_update_system,
+            scaffold_input_system,
         ))
-        .add_systems(Update, vfx_tick_and_cleanup)
+        .add_systems(Update, (vfx_tick_and_cleanup, scaffold_tick_and_cleanup))
         .run();
 }
 
@@ -725,6 +740,93 @@ fn setup_net_client(mut commands: Commands) {
     commands.insert_resource(ScoreVisible::default());
     commands.insert_resource(RoundUi::default());
     commands.insert_resource(LocalAmmo { ammo: 0, reloading: false });
+}
+
+// ===== Scaffold Systems =====
+fn scaffold_input_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    cam_q: Query<&GlobalTransform, With<Camera3d>>,
+    player_q: Query<Entity, With<Player>>,
+    rapier: Res<RapierContext>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    local_id: Res<LocalNetInfo>,
+    mut owned: ResMut<LocalScaffolds>,
+) {
+    if !keys.just_pressed(KeyCode::KeyQ) { return; }
+    let cam_g = if let Ok(v) = cam_q.get_single() { v } else { return };
+    let player_ent = if let Ok(e) = player_q.get_single() { e } else { return };
+
+    let origin = cam_g.translation();
+    let dir: Vec3 = cam_g.forward().into();
+
+    let mut hit_pos = origin + dir * SCAFFOLD_RANGE;
+    if let Some((entity, toi)) = rapier.cast_ray(
+        origin,
+        dir,
+        SCAFFOLD_RANGE,
+        true,
+        QueryFilter::default().exclude_collider(player_ent).exclude_sensors(),
+    ) {
+        let _ = entity; // 現状は未使用
+        hit_pos = origin + dir * toi;
+    }
+
+    // 常に水平（Y+ up）で配置。床の場合は僅かに浮かせてZファイティング回避
+    let place_pos = hit_pos + Vec3::Y * (SCAFFOLD_SIZE.y * 0.5 + 0.01);
+
+    // 3つ上限：超えたら一番古いものを消す
+    if owned.0.len() >= SCAFFOLD_PER_PLAYER_LIMIT {
+        if let Some(old) = owned.0.first().copied() {
+            commands.entity(old).despawn_recursive();
+        }
+        owned.0.remove(0);
+    }
+
+    let mesh = meshes.add(Cuboid::new(SCAFFOLD_SIZE.x, SCAFFOLD_SIZE.y, SCAFFOLD_SIZE.z));
+    let col = Color::srgba(0.2, 0.9, 1.0, 0.45);
+    let mat = materials.add(StandardMaterial {
+        base_color: col,
+        emissive: Color::srgb(0.3, 0.8, 1.0).into(),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+
+    let ent = commands
+        .spawn((
+            PbrBundle {
+                mesh,
+                material: mat,
+                transform: Transform::from_translation(place_pos),
+                ..default()
+            },
+            Scaffold { hp: SCAFFOLD_HP, life: Timer::from_seconds(SCAFFOLD_LIFETIME, TimerMode::Once), owner: local_id.id },
+            Collider::cuboid(SCAFFOLD_SIZE.x * 0.5, SCAFFOLD_SIZE.y * 0.5, SCAFFOLD_SIZE.z * 0.5),
+            RigidBody::Fixed,
+        ))
+        .id();
+
+    owned.0.push(ent);
+}
+
+fn scaffold_tick_and_cleanup(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Scaffold)>,
+    mut owned: ResMut<LocalScaffolds>,
+) {
+    for (e, mut sc) in &mut q {
+        sc.life.tick(time.delta());
+        if sc.life.finished() {
+            commands.entity(e).despawn_recursive();
+            // 所有リストからも除去
+            if let Some(idx) = owned.0.iter().position(|x| *x == e) {
+                owned.0.remove(idx);
+            }
+        }
+    }
 }
 
 fn hud_update_ammo(mut q: Query<&mut Text, With<UiAmmo>>, ammo: Res<LocalAmmo>) {
