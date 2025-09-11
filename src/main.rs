@@ -27,6 +27,9 @@ const BULLET_LIFETIME: f32 = 2.0; // sec
 const GRAVITY: f32 = 9.81; // m/s^2
 const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
 const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
+// Position reconciliation thresholds (client-authoritative bias)
+const POS_DEADBAND: f32 = 0.03; // meters: ignore tiny diffs (stop jitter)
+const POS_SNAP: f32 = 0.8; // meters: snap when far out-of-bounds
 
 #[inline]
 fn wrap_pi(a: f32) -> f32 {
@@ -148,7 +151,6 @@ fn main() {
             keyboard_look_system,
             kcc_move_system,
             kcc_post_step_system,
-            reconcile_self,
             shoot_system,
             bullet_move_and_despawn,
             add_mesh_colliders_for_map,
@@ -156,6 +158,7 @@ fn main() {
             net_send_input,
             net_recv_snapshot,
             net_recv_events,
+            reconcile_self,
             hud_update_hp,
             hud_tick_hit_marker,
             hud_tick_killlog,
@@ -842,6 +845,7 @@ fn net_recv_events(
     mut round_ui: ResMut<RoundUi>,
     mut local_ammo: ResMut<LocalAmmo>,
     mut kinds: ResMut<ActorKindsMap>,
+    mut player_q: Query<(&mut Transform, &mut Controller), With<Player>>,
 ) {
     while let Some(raw) = client.receive_message(CH_RELIABLE) {
         if let Ok(msg) = bincode::deserialize::<ServerMessage>(&raw) {
@@ -853,6 +857,11 @@ fn net_recv_events(
                     if id == local.id {
                         self_auth.pos = Some(p);
                         my_hp.hp = 100;
+                        // Teleport local player to server spawn to avoid later corrections.
+                        if let Ok((mut tf, mut ctrl)) = player_q.get_single_mut() {
+                            tf.translation = p;
+                            ctrl.vy = 0.0; ctrl.on_ground = true; ctrl.jumps = 0;
+                        }
                     } else {
                         if let Some(&ent) = remap.0.get(&id) {
                             if let Some(mut ec) = commands.get_entity(ent) {
@@ -979,15 +988,20 @@ fn reconcile_self(
     mut q: Query<&mut Transform, With<Player>>,
     self_auth: Res<AuthoritativeSelf>,
 ) {
+    // Position reconciliation is opt-in; default off to prefer client authority.
+    if !matches!(std::env::var("RECONCILE_POS").ok().as_deref(), Some("1" | "true" | "TRUE")) { return; }
     let mut tf = if let Ok(t) = q.get_single_mut() { t } else { return };
     if let Some(target) = self_auth.pos {
         let diff = target - tf.translation;
         let d = diff.length();
-        if d > 0.001 {
-            let rate = 10.0; // per second
-            let step = (rate * time.delta_seconds()).min(1.0);
-            tf.translation += diff * step;
-        }
+        // Deadband: ignore tiny differences to avoid visible jitter.
+        if d <= POS_DEADBAND { return; }
+        // Snap when far out-of-bounds to recover quickly.
+        if d >= POS_SNAP { tf.translation = target; return; }
+        // Smooth correction within thresholds.
+        let rate = 10.0; // per second
+        let step = (rate * time.delta_seconds()).min(1.0);
+        tf.translation += diff * step;
     }
     if matches!(std::env::var("RECONCILE_YAW").ok().as_deref(), Some("1" | "true" | "TRUE")) { if let Some(yaw) = self_auth.yaw {
         // 軽い追従のみ（強いワープは避ける）
