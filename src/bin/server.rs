@@ -1029,7 +1029,14 @@ fn srv_shoot_and_respawn(
             let w = wpnprot.weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
             let last_seq = last_fire.0.entry(id).or_insert(0);
             *last_seq = inp.seq;
-            if w.reload <= 0.0 && w.cooldown <= 0.0 && w.ammo > 0 && wpnprot.protect.0.get(&id).copied().unwrap_or(0.0) <= 0.0 {
+            if w.reload <= 0.0 && w.cooldown <= 0.0 && wpnprot.protect.0.get(&id).copied().unwrap_or(0.0) <= 0.0 {
+                if w.ammo == 0 {
+                    if w.reload <= 0.0 { w.reload = RELOAD_TIME; }
+                    if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: w.ammo, reloading: true })) {
+                        for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                    }
+                    continue;
+                }
                 w.ammo = w.ammo.saturating_sub(1); w.cooldown = FIRE_COOLDOWN;
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: w.ammo, reloading: false })) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
                 let mut filter = QueryFilter::default(); if let Some(&self_ent) = ents.0.get(&id) { filter = filter.exclude_collider(self_ent); }
