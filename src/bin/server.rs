@@ -696,7 +696,10 @@ fn process_scaffold_requests(
         let dir = (Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)) * forward;
 
         let mut hit_pos = origin + dir * SCAFFOLD_RANGE;
-        if let Some((_entity, toi)) = rapier.cast_ray(origin, dir, SCAFFOLD_RANGE, true, QueryFilter::default().exclude_collider(p_ent).exclude_sensors()) {
+        // 既存の足場コライダを除外して、床や地形に正しく投影する
+        let mut qf = QueryFilter::default().exclude_collider(p_ent).exclude_sensors();
+        for &e in sc_ents.0.values() { qf = qf.exclude_collider(e); }
+        if let Some((_entity, toi)) = rapier.cast_ray(origin, dir, SCAFFOLD_RANGE, true, qf) {
             hit_pos = origin + dir * toi;
         }
         let place = hit_pos + Vec3::Y * (SCAFFOLD_SIZE.y * 0.5 + 0.01);
