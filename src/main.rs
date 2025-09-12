@@ -26,6 +26,8 @@ const RUN_MULTIPLIER: f32 = 1.7;
 const MOUSE_SENSITIVITY: f32 = 0.0018; // rad/pixel
 const HIP_FOV: f32 = 90.0_f32.to_radians();
 const ADS_FOV: f32 = 65.0_f32.to_radians();
+const ADS_SENS_MUL: f32 = 0.6; // ADS中のマウス感度倍率
+const ADS_SPEED_MUL: f32 = 0.6; // ADS中の移動速度倍率
 const BULLET_SPEED: f32 = 40.0; // m/s
 const BULLET_LIFETIME: f32 = 2.0; // sec
 const GRAVITY: f32 = 9.81; // m/s^2
@@ -328,6 +330,7 @@ fn cursor_lock_controls(
 fn mouse_look_system(
     mut mouse_evr: EventReader<MouseMotion>,
     locked: Res<CursorLocked>,
+    buttons: Res<ButtonInput<MouseButton>>,
     mut q: ParamSet<(
         Query<&mut Transform, (With<Player>, Without<Camera3d>)>,
         Query<(&mut Transform, &mut PlayerCamera), With<Camera3d>>,
@@ -353,8 +356,10 @@ fn mouse_look_system(
     {
         let mut cam_query = q.p1();
         let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else { return };
-        pcam.yaw = wrap_pi(pcam.yaw - delta.x * MOUSE_SENSITIVITY);
-        pcam.pitch = (pcam.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-1.54, 1.54);
+        let sens_mul = if buttons.pressed(MouseButton::Right) { ADS_SENS_MUL } else { 1.0 };
+        let sens = MOUSE_SENSITIVITY * sens_mul;
+        pcam.yaw = wrap_pi(pcam.yaw - delta.x * sens);
+        pcam.pitch = (pcam.pitch - delta.y * sens).clamp(-1.54, 1.54);
         new_yaw = pcam.yaw;
         new_pitch = pcam.pitch;
         cam_tf.rotation = Quat::from_rotation_x(pcam.pitch);
@@ -541,6 +546,7 @@ fn keyboard_look_system(
 fn kcc_move_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     cam_q: Query<&PlayerCamera, With<Camera3d>>,
     mut q: Query<(&mut KinematicCharacterController, &mut Controller), With<Player>>,
     ready: Res<MapReady>,
@@ -567,6 +573,7 @@ fn kcc_move_system(
     if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
         speed *= RUN_MULTIPLIER;
     }
+    if buttons.pressed(MouseButton::Right) { speed *= ADS_SPEED_MUL; }
 
     // 重力・ジャンプ
     let dt = time.delta_seconds();
@@ -1217,12 +1224,13 @@ fn reconcile_self(
                     let yaw_rot = Quat::from_rotation_y(f.yaw);
                     horiz = (yaw_rot * input).normalize();
                 }
-                let mut speed = MOVE_SPEED;
-                if f.run { speed *= RUN_MULTIPLIER; }
-                if f.jump && (used_jumps == 0) { vy = JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
-                vy -= GRAVITY * f.dt;
-                target += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
-            }
+            let mut speed = MOVE_SPEED;
+            if f.run { speed *= RUN_MULTIPLIER; }
+            if f.ads { speed *= ADS_SPEED_MUL; }
+            if f.jump && (used_jumps == 0) { vy = JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
+            vy -= GRAVITY * f.dt;
+            target += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
+        }
         }
         let diff = target - tf.translation;
         let d = diff.length();
