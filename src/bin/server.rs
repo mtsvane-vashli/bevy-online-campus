@@ -708,23 +708,32 @@ fn process_scaffold_requests(
         // --- 交差/近接チェック（所有者と重ならないように）
         if let Some(pst) = players.states.get(&owner) {
             let ply = pst.pos;
-            let player_radius = 0.3f32; // Collider::capsule_y(0.6, 0.3) と一致
+            let player_radius = 0.3f32; // Collider::capsule_y(0.6, 0.3) に合わせる
             let half_extent = (SCAFFOLD_SIZE.x.max(SCAFFOLD_SIZE.z)) * 0.5;
             let margin = 0.06f32;
             let min_dist = player_radius + half_extent + margin;
-            let mut horiz_dir = dir.with_y(0.0);
-            if horiz_dir.length_squared() > 1e-6 { horiz_dir = horiz_dir.normalize(); }
-            // 最大3回、前方にスライドして回避を試みる
-            for _ in 0..3 {
-                let d = (place - ply).with_y(0.0).length();
-                if d >= min_dist { break; }
-                place += horiz_dir * 0.25;
-            }
-            // それでも近すぎる場合は次フレームに再試行
-            let d_final = (place - ply).with_y(0.0).length();
-            if d_final < min_dist {
-                pending.0.push((owner, origin_in, dir_in));
-                continue;
+            let mut dvec = (place - ply).with_y(0.0);
+            let mut d = dvec.length();
+            if d < min_dist {
+                // 前方（視線）方向の水平成分を優先して、必要量を一度にスライド
+                let mut slide_dir = dir.with_y(0.0);
+                if slide_dir.length_squared() <= 1e-6 {
+                    // 視線がほぼ上下のときはプレイヤーから離れる方向を使用
+                    slide_dir = if dvec.length_squared() > 1e-6 { dvec.normalize() } else { Vec3::X };
+                } else {
+                    slide_dir = slide_dir.normalize();
+                }
+                let delta = (min_dist - d) + 0.02; // ほんの少し余裕
+                place += slide_dir * delta;
+                // 再計算（過剰に近いケースの最終確認）
+                d = (place - ply).with_y(0.0).length();
+                if d < min_dist {
+                    // まだ近すぎる場合は左右どちらかに小さく逃がす（単発）
+                    let left = Vec3::Y.cross(slide_dir).normalize_or_zero();
+                    if left.length_squared() > 1e-6 {
+                        place += left * (min_dist - d + 0.02);
+                    }
+                }
             }
         }
 
