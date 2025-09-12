@@ -28,8 +28,8 @@ const BULLET_LIFETIME: f32 = 2.0; // sec
 const GRAVITY: f32 = 9.81; // m/s^2
 const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
 const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
-// Position reconciliation thresholds (client-authoritative bias)
-const POS_DEADBAND: f32 = 0.03; // meters: ignore tiny diffs (stop jitter)
+// Position reconciliation thresholds (light server convergence)
+const POS_DEADBAND: f32 = 0.05; // meters: ignore tiny diffs (stop jitter)
 const POS_SNAP: f32 = 0.8; // meters: snap when far out-of-bounds
 
 #[inline]
@@ -1149,8 +1149,8 @@ fn reconcile_self(
     mut q: Query<&mut Transform, With<Player>>,
     self_auth: Res<AuthoritativeSelf>,
 ) {
-    // Position reconciliation is opt-in; default off to prefer client authority.
-    if !matches!(std::env::var("RECONCILE_POS").ok().as_deref(), Some("1" | "true" | "TRUE")) { return; }
+    // Default: enable light position reconciliation. Set RECONCILE_POS=0 to disable.
+    if matches!(std::env::var("RECONCILE_POS").ok().as_deref(), Some("0" | "false" | "FALSE")) { return; }
     let mut tf = if let Ok(t) = q.get_single_mut() { t } else { return };
     if let Some(target) = self_auth.pos {
         let diff = target - tf.translation;
@@ -1160,7 +1160,7 @@ fn reconcile_self(
         // Snap when far out-of-bounds to recover quickly.
         if d >= POS_SNAP { tf.translation = target; return; }
         // Smooth correction within thresholds.
-        let rate = 10.0; // per second
+        let rate = 6.0; // per second (softer to reduce rubberband feel)
         let step = (rate * time.delta_seconds()).min(1.0);
         tf.translation += diff * step;
     }
