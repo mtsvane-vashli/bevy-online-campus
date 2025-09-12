@@ -21,6 +21,7 @@ pub struct InputFrame {
     pub fire: bool,
     pub yaw: f32,
     pub pitch: f32,
+    pub dt: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
