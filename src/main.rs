@@ -10,6 +10,7 @@ use bevy::ecs::system::SystemParam;
 use bevy_renet::RenetClientPlugin;
 use bevy_renet::transport::NetcodeClientPlugin;
 use bevy_renet::renet::RenetClient;
+use bevy::render::camera::Projection;
 use std::f32::consts::PI;
 use std::time::Duration;
 
@@ -23,6 +24,8 @@ const PLAYER_START: Vec3 = Vec3::new(0.0, 10.0, 5.0);
 const MOVE_SPEED: f32 = 6.0; // m/s
 const RUN_MULTIPLIER: f32 = 1.7;
 const MOUSE_SENSITIVITY: f32 = 0.0018; // rad/pixel
+const HIP_FOV: f32 = 90.0_f32.to_radians();
+const ADS_FOV: f32 = 65.0_f32.to_radians();
 const BULLET_SPEED: f32 = 40.0; // m/s
 const BULLET_LIFETIME: f32 = 2.0; // sec
 const GRAVITY: f32 = 9.81; // m/s^2
@@ -178,6 +181,7 @@ fn main() {
         .add_systems(Update, handle_focus_events)
         .add_systems(Update, cursor_lock_controls)
         .add_systems(Update, mouse_look_system)
+        .add_systems(Update, ads_zoom_system)
         .add_systems(Update, keyboard_look_system)
         .add_systems(Update, kcc_move_system)
         .add_systems(Update, kcc_post_step_system)
@@ -935,17 +939,21 @@ fn net_send_input(
     if keys.pressed(KeyCode::KeyD) { mv[0] += 1.0; }
     let run = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let jump = keys.just_pressed(KeyCode::Space);
-    let fire = buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF);
+    // 連射: 押しっぱなしで true を送り続ける
+    let fire = buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::KeyF);
+    // 右クリックADS（送信用フラグ）
+    let ads = buttons.pressed(MouseButton::Right);
     seq.0 = seq.0.wrapping_add(1);
     let dt = time.delta_seconds();
-    let frame = InputFrame { seq: seq.0, mv, run, jump, fire, yaw: cam.yaw, pitch: cam.pitch, dt };
+    let frame = InputFrame { seq: seq.0, mv, run, jump, fire, ads, yaw: cam.yaw, pitch: cam.pitch, dt };
     buf.0.push_back(frame.clone());
     if let Some(ack) = last_conf.0 {
         while let Some(front) = buf.0.front() { if front.seq <= ack { buf.0.pop_front(); } else { break; } }
     }
     if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) { let _ = client.send_message(CH_INPUT, bytes); }
     // 射撃要求はカメラの原点・方向を添えて信頼チャネルで即送信
-    if fire {
+    // サーバ権威の射撃イベント（起点のみ信頼送信）
+    if buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF) {
         let origin = cam_tf.translation();
         let dir: Vec3 = cam_tf.forward().into();
         if dir.length_squared() > 1e-6 {
@@ -1302,5 +1310,16 @@ fn vfx_tick_and_cleanup(
             col.0 = Color::rgba(0.8, 0.0, 0.0, 0.35 * t);
         }
         if v.timer.finished() { commands.entity(e).despawn_recursive(); }
+    }
+}
+
+// 右クリックADS時にFOVを切り替える（クライアント視覚のみ）
+fn ads_zoom_system(
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut q: Query<&mut Projection, With<Camera3d>>,
+){
+    let Ok(mut proj) = q.get_single_mut() else { return };
+    if let Projection::Perspective(ref mut p) = *proj {
+        p.fov = if buttons.pressed(MouseButton::Right) { ADS_FOV } else { HIP_FOV };
     }
 }
