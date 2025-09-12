@@ -703,7 +703,30 @@ fn process_scaffold_requests(
         if let Some((_entity, toi)) = rapier.cast_ray(origin, dir, SCAFFOLD_RANGE, true, qf) {
             hit_pos = origin + dir * toi;
         }
-        let place = hit_pos + Vec3::Y * (SCAFFOLD_SIZE.y * 0.5 + 0.01);
+        let mut place = hit_pos + Vec3::Y * (SCAFFOLD_SIZE.y * 0.5 + 0.01);
+
+        // --- 交差/近接チェック（所有者と重ならないように）
+        if let Some(pst) = players.states.get(&owner) {
+            let ply = pst.pos;
+            let player_radius = 0.3f32; // Collider::capsule_y(0.6, 0.3) と一致
+            let half_extent = (SCAFFOLD_SIZE.x.max(SCAFFOLD_SIZE.z)) * 0.5;
+            let margin = 0.06f32;
+            let min_dist = player_radius + half_extent + margin;
+            let mut horiz_dir = dir.with_y(0.0);
+            if horiz_dir.length_squared() > 1e-6 { horiz_dir = horiz_dir.normalize(); }
+            // 最大3回、前方にスライドして回避を試みる
+            for _ in 0..3 {
+                let d = (place - ply).with_y(0.0).length();
+                if d >= min_dist { break; }
+                place += horiz_dir * 0.25;
+            }
+            // それでも近すぎる場合は次フレームに再試行
+            let d_final = (place - ply).with_y(0.0).length();
+            if d_final < min_dist {
+                pending.0.push((owner, origin_in, dir_in));
+                continue;
+            }
+        }
 
         // per-owner limit (FIFO)
         let mut to_remove: Option<u64> = None;
