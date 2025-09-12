@@ -42,6 +42,8 @@ pub struct SnapshotMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
     Input(InputFrame),
+    // クライアントが足場生成を要求（サーバでレイ復元・検証して生成）
+    PlaceScaffold,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +63,9 @@ pub enum EventMsg {
     RoundEnd { winner_id: Option<u64>, next_in_sec: u32 },
     Ammo { id: u64, ammo: u16, reloading: bool },
     Fire { id: u64, origin: [f32; 3], dir: [f32; 3], hit: Option<[f32; 3]> },
+    // 足場の生成/消滅（サーバ権威）
+    ScaffoldSpawn { sid: u64, owner: u64, pos: [f32; 3] },
+    ScaffoldDespawn { sid: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

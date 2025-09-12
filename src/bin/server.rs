@@ -167,6 +167,29 @@ const BOT_AIRBORNE_SPREAD_MUL: f32 = 1.5; // 空中ターゲット拡散倍率
 const SPAWN_JITTER_RADIUS: f32 = 6.0; // スポーン分散半径
 const PROTECT_SEC: f32 = 2.0; // リスポーン保護（無敵・発砲不可）
 
+// ===== Scaffold params (server authority; クライアントと合わせる) =====
+const SCAFFOLD_SIZE: Vec3 = Vec3::new(2.0, 0.5, 2.0);
+const SCAFFOLD_RANGE: f32 = 5.0;
+const SCAFFOLD_LIFETIME: f32 = 10.0;
+const SCAFFOLD_PER_PLAYER_LIMIT: usize = 3;
+
+#[derive(Resource, Default)]
+struct Scaffolds {
+    // sid -> (owner, pos, remaining_life_sec)
+    by_id: HashMap<u64, (u64, Vec3, f32)>,
+    // owner -> [sid FIFO]
+    per_owner: HashMap<u64, Vec<u64>>,
+}
+
+#[derive(Resource, Default)]
+struct ScaffoldEntities(HashMap<u64, Entity>); // sid -> entity
+
+#[derive(Resource)]
+struct NextScaffoldId(u64);
+
+#[derive(Resource, Default)]
+struct PendingScaffold(Vec<u64>); // client id list
+
 fn main() {
     App::new()
         // ヘッドレス運用: WinitPlugin（X/Wayland依存のイベントループ）を無効化
@@ -211,6 +234,10 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(SnapshotTimer(Timer::from_seconds(1.0/30.0, TimerMode::Repeating)))
         .insert_resource(ServerLogTimer(Timer::from_seconds(1.0, TimerMode::Repeating)))
+        .insert_resource(Scaffolds::default())
+        .insert_resource(ScaffoldEntities::default())
+        .insert_resource(NextScaffoldId(2_000_000_000_000))
+        .insert_resource(PendingScaffold::default())
         .add_systems(Startup, (setup_server, setup_map))
         .add_systems(Update, (accept_clients, add_mesh_colliders_for_map, collect_spawn_points_from_map, ensure_bots, log_clients_count))
         .add_systems(Update, sync_players_with_connections)
@@ -222,6 +249,8 @@ fn main() {
         .add_systems(FixedUpdate, srv_kcc_post.after(PhysicsSet::Writeback))
         .add_systems(FixedUpdate, bot_kcc_post.after(PhysicsSet::Writeback))
         .add_systems(FixedUpdate, srv_shoot_and_respawn.after(srv_kcc_post))
+        .add_systems(FixedUpdate, process_scaffold_requests.after(srv_shoot_and_respawn))
+        .add_systems(FixedUpdate, scaffold_tick_and_cleanup_srv.after(process_scaffold_requests))
         .add_systems(FixedUpdate, bot_ai_shoot_and_respawn.after(srv_shoot_and_respawn))
         .add_systems(FixedUpdate, broadcast_snapshots.after(bot_ai_shoot_and_respawn))
         .add_systems(FixedUpdate, round_update.after(broadcast_snapshots))
@@ -245,6 +274,7 @@ fn accept_clients(
     spawns: Res<SpawnPoints>,
     mut weapons: ResMut<Weapons>,
     mut protect: ResMut<ProtectTimers>,
+    scaffolds: Res<Scaffolds>,
 ) {
     while let Some(event) = server.get_event() {
         match event {
@@ -275,6 +305,11 @@ fn accept_clients(
                 // 現在のラウンド残り時間を通知
                 let ev = ServerMessage::Event(EventMsg::RoundStart { time_left_sec: round.time_left.max(0.0) as u32 });
                 if let Ok(bytes) = bincode::serialize(&ev) { let _ = server.send_message(client_id, CH_RELIABLE, bytes); }
+                // 既存の足場を新規クライアントにのみ通知
+                for (sid, (owner, pos, _life)) in scaffolds.by_id.iter() {
+                    let ev = ServerMessage::Event(EventMsg::ScaffoldSpawn { sid: *sid, owner: *owner, pos: [pos.x, pos.y, pos.z] });
+                    if let Ok(bytes) = bincode::serialize(&ev) { let _ = server.send_message(client_id, CH_RELIABLE, bytes); }
+                }
             }
             bevy_renet::renet::ServerEvent::ClientDisconnected { client_id, reason } => {
                 let id = client_id.raw();
@@ -342,12 +377,18 @@ fn ensure_bots(
     }
 }
 
-fn recv_inputs(mut server: ResMut<RenetServer>, mut last: ResMut<LastInputs>) {
+fn recv_inputs(mut server: ResMut<RenetServer>, mut last: ResMut<LastInputs>, mut pending: ResMut<PendingScaffold>) {
     for client_id in server.clients_id().iter().copied().collect::<Vec<ClientId>>() {
         while let Some(raw) = server.receive_message(client_id, CH_INPUT) {
             if let Ok(msg) = bincode::deserialize::<ClientMessage>(&raw) {
-                let ClientMessage::Input(frame) = msg;
-                last.0.insert(client_id.raw(), frame);
+                match msg {
+                    ClientMessage::Input(frame) => {
+                        last.0.insert(client_id.raw(), frame);
+                    }
+                    ClientMessage::PlaceScaffold => {
+                        pending.0.push(client_id.raw());
+                    }
+                }
             }
         }
     }
@@ -614,6 +655,101 @@ fn bot_kcc_move_fsm(
             let vy = state.vy - 9.81 * dt;
             kcc.translation = Some(horiz * dt + Vec3::Y * vy * dt);
             state.vy = vy;
+        }
+    }
+}
+
+// --- Scaffold: server-authoritative generation and lifecycle ---
+
+fn process_scaffold_requests(
+    mut commands: Commands,
+    mut pending: ResMut<PendingScaffold>,
+    mut scaffolds: ResMut<Scaffolds>,
+    mut sc_ents: ResMut<ScaffoldEntities>,
+    mut server: ResMut<RenetServer>,
+    players: Res<Players>,
+    ents: Res<ServerEntities>,
+    last: Res<LastInputs>,
+    rapier: Res<RapierContext>,
+    mut next_sid: ResMut<NextScaffoldId>,
+) {
+    if pending.0.is_empty() { return; }
+    let requests: Vec<u64> = pending.0.drain(..).collect();
+    for owner in requests {
+        let Some(pstate) = players.states.get(&owner) else { continue };
+        let Some(inp) = last.0.get(&owner) else { continue };
+        let Some(&p_ent) = ents.0.get(&owner) else { continue };
+
+        let origin = pstate.pos + Vec3::Y * 0.7;
+        let forward = Vec3::new(0.0, 0.0, -1.0);
+        let dir = (Quat::from_rotation_y(inp.yaw) * Quat::from_rotation_x(inp.pitch)) * forward;
+
+        let mut hit_pos = origin + dir * SCAFFOLD_RANGE;
+        if let Some((_entity, toi)) = rapier.cast_ray(origin, dir, SCAFFOLD_RANGE, true, QueryFilter::default().exclude_collider(p_ent).exclude_sensors()) {
+            hit_pos = origin + dir * toi;
+        }
+        let place = hit_pos + Vec3::Y * (SCAFFOLD_SIZE.y * 0.5 + 0.01);
+
+        // per-owner limit (FIFO)
+        let mut to_remove: Option<u64> = None;
+        {
+            let vec = scaffolds.per_owner.entry(owner).or_default();
+            if vec.len() >= SCAFFOLD_PER_PLAYER_LIMIT {
+                to_remove = Some(vec.remove(0));
+            }
+        }
+        if let Some(old) = to_remove {
+            if let Some(e) = sc_ents.0.remove(&old) { commands.entity(e).despawn_recursive(); }
+            scaffolds.by_id.remove(&old);
+            let ev = ServerMessage::Event(EventMsg::ScaffoldDespawn { sid: old });
+            if let Ok(bytes) = bincode::serialize(&ev) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
+        }
+
+        let sid = { let cur = next_sid.0; next_sid.0 += 1; cur };
+        let ent = commands.spawn((
+            TransformBundle::from_transform(Transform::from_translation(place)),
+            Collider::cuboid(SCAFFOLD_SIZE.x * 0.5, SCAFFOLD_SIZE.y * 0.5, SCAFFOLD_SIZE.z * 0.5),
+            RigidBody::Fixed,
+        )).id();
+        sc_ents.0.insert(sid, ent);
+        scaffolds.per_owner.entry(owner).or_default().push(sid);
+        scaffolds.by_id.insert(sid, (owner, place, SCAFFOLD_LIFETIME));
+
+        let ev = ServerMessage::Event(EventMsg::ScaffoldSpawn { sid, owner, pos: [place.x, place.y, place.z] });
+        if let Ok(bytes) = bincode::serialize(&ev) {
+            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+        }
+    }
+}
+
+fn scaffold_tick_and_cleanup_srv(
+    time_fixed: Res<Time<Fixed>>,
+    mut commands: Commands,
+    mut scaffolds: ResMut<Scaffolds>,
+    mut sc_ents: ResMut<ScaffoldEntities>,
+    mut server: ResMut<RenetServer>,
+) {
+    let dt = time_fixed.delta_seconds();
+    if scaffolds.by_id.is_empty() { return; }
+    let mut expired: Vec<u64> = Vec::new();
+    for (sid, (_owner, _pos, life)) in scaffolds.by_id.iter_mut() {
+        *life -= dt;
+        if *life <= 0.0 { expired.push(*sid); }
+    }
+    if expired.is_empty() { return; }
+    for sid in expired {
+        if let Some((_owner, _pos, _)) = scaffolds.by_id.remove(&sid) {
+            if let Some(e) = sc_ents.0.remove(&sid) { commands.entity(e).despawn_recursive(); }
+            // per_owner からも削除
+            for v in scaffolds.per_owner.values_mut() {
+                if let Some(i) = v.iter().position(|x| *x == sid) { v.remove(i); break; }
+            }
+            let ev = ServerMessage::Event(EventMsg::ScaffoldDespawn { sid });
+            if let Ok(bytes) = bincode::serialize(&ev) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
         }
     }
 }
