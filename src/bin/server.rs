@@ -1362,6 +1362,7 @@ fn broadcast_snapshots(
     mut server: ResMut<RenetServer>,
     players: Res<Players>,
     bots: Res<Bots>,
+    last: Res<LastInputs>,
 ) {
     timer.0.tick(time_fixed.delta());
     if !timer.0.finished() { return; }
@@ -1374,7 +1375,9 @@ fn broadcast_snapshots(
     if matches!(std::env::var("NET_SNAPSHOT_LOG").ok(), Some(_)) {
         info!("server: snapshot actors={}", players_vec.len());
     }
-    let snap = SnapshotMsg { tick: 0, players: players_vec };
+    let mut acks: Vec<(u64, u32)> = Vec::new();
+    for (id, inp) in last.0.iter() { acks.push((*id, inp.seq)); }
+    let snap = SnapshotMsg { tick: 0, players: players_vec, acks };
     let bytes = bincode::serialize(&ServerMessage::Snapshot(snap)).unwrap();
     for client_id in server.clients_id() {
         let _ = server.send_message(client_id, CH_SNAPSHOT, bytes.clone());

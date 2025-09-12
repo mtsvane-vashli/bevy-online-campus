@@ -37,6 +37,8 @@ pub struct PlayerStateMsg {
 pub struct SnapshotMsg {
     pub tick: u32,
     pub players: Vec<PlayerStateMsg>,
+    // サーバが各クライアントについて直近処理した入力seq（ACK）
+    pub acks: Vec<(u64, u32)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
