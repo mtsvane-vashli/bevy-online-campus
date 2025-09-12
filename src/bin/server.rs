@@ -188,7 +188,7 @@ struct ScaffoldEntities(HashMap<u64, Entity>); // sid -> entity
 struct NextScaffoldId(u64);
 
 #[derive(Resource, Default)]
-struct PendingScaffold(Vec<u64>); // client id list
+struct PendingScaffold(Vec<(u64, Vec3, Vec3)>); // (owner, origin, dir)
 
 fn main() {
     App::new()
@@ -385,16 +385,22 @@ fn recv_inputs(mut server: ResMut<RenetServer>, mut last: ResMut<LastInputs>, mu
                     ClientMessage::Input(frame) => {
                         last.0.insert(client_id.raw(), frame);
                     }
-                    ClientMessage::PlaceScaffold => {
-                        pending.0.push(client_id.raw());
+                    ClientMessage::PlaceScaffold { origin, dir } => {
+                        let o = Vec3::new(origin[0], origin[1], origin[2]);
+                        let d = Vec3::new(dir[0], dir[1], dir[2]);
+                        pending.0.push((client_id.raw(), o, d));
                     }
                 }
             }
         }
         // 念のため、信頼チャネルにも PlaceScaffold が来た場合を拾う
         while let Some(raw) = server.receive_message(client_id, CH_RELIABLE) {
-            if let Ok(ClientMessage::PlaceScaffold) = bincode::deserialize::<ClientMessage>(&raw) {
-                pending.0.push(client_id.raw());
+            if let Ok(ClientMessage::PlaceScaffold { origin, dir }) = bincode::deserialize::<ClientMessage>(&raw) {
+                let o = Vec3::new(origin[0], origin[1], origin[2]);
+                let d = Vec3::new(dir[0], dir[1], dir[2]);
+                pending.0.push((client_id.raw(), o, d));
+            } else if let Ok(ClientMessage::Input(frame)) = bincode::deserialize::<ClientMessage>(&raw) {
+                last.0.insert(client_id.raw(), frame);
             }
         }
     }
@@ -680,20 +686,12 @@ fn process_scaffold_requests(
     mut next_sid: ResMut<NextScaffoldId>,
 ) {
     if pending.0.is_empty() { return; }
-    let requests: Vec<u64> = pending.0.drain(..).collect();
-    for owner in requests {
-        let Some(pstate) = players.states.get(&owner) else { continue };
-        // yaw/pitch は最新入力があればそれを、無ければ現在状態（pitch=0）で推定
-        let (yaw, pitch) = if let Some(inp) = last.0.get(&owner) {
-            (inp.yaw, inp.pitch)
-        } else if let Some(st) = players.states.get(&owner) {
-            (st.yaw, 0.0)
-        } else { continue };
+    let requests: Vec<(u64, Vec3, Vec3)> = pending.0.drain(..).collect();
+    for (owner, origin_in, dir_in) in requests {
+        let Some(_pstate) = players.states.get(&owner) else { continue };
+        let dir = if dir_in.length_squared() > 1e-6 { dir_in.normalize() } else { continue };
         let Some(&p_ent) = ents.0.get(&owner) else { continue };
-
-        let origin = pstate.pos + Vec3::Y * 0.7;
-        let forward = Vec3::NEG_Z;
-        let dir = (Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)) * forward;
+        let origin = origin_in;
 
         let mut hit_pos = origin + dir * SCAFFOLD_RANGE;
         // 既存の足場コライダを除外して、床や地形に正しく投影する

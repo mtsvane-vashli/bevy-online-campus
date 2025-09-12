@@ -42,8 +42,8 @@ pub struct SnapshotMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
     Input(InputFrame),
-    // クライアントが足場生成を要求（サーバでレイ復元・検証して生成）
-    PlaceScaffold,
+    // クライアントが足場生成を要求（カメラの原点・方向を送る）
+    PlaceScaffold { origin: [f32; 3], dir: [f32; 3] },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
