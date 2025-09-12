@@ -188,7 +188,7 @@ struct ScaffoldEntities(HashMap<u64, Entity>); // sid -> entity
 struct NextScaffoldId(u64);
 
 #[derive(Resource, Default)]
-struct PendingScaffold(Vec<(u64, Vec3, Vec3)>); // (owner, origin, dir)
+struct PendingScaffold(Vec<(u64, Vec3)>); // (owner, final_pos)
 
 fn main() {
     App::new()
@@ -385,20 +385,18 @@ fn recv_inputs(mut server: ResMut<RenetServer>, mut last: ResMut<LastInputs>, mu
                     ClientMessage::Input(frame) => {
                         last.0.insert(client_id.raw(), frame);
                     }
-                    ClientMessage::PlaceScaffold { origin, dir } => {
-                        let o = Vec3::new(origin[0], origin[1], origin[2]);
-                        let d = Vec3::new(dir[0], dir[1], dir[2]);
-                        pending.0.push((client_id.raw(), o, d));
+                    ClientMessage::PlaceScaffold { pos } => {
+                        let p = Vec3::new(pos[0], pos[1], pos[2]);
+                        pending.0.push((client_id.raw(), p));
                     }
                 }
             }
         }
         // 念のため、信頼チャネルにも PlaceScaffold が来た場合を拾う
         while let Some(raw) = server.receive_message(client_id, CH_RELIABLE) {
-            if let Ok(ClientMessage::PlaceScaffold { origin, dir }) = bincode::deserialize::<ClientMessage>(&raw) {
-                let o = Vec3::new(origin[0], origin[1], origin[2]);
-                let d = Vec3::new(dir[0], dir[1], dir[2]);
-                pending.0.push((client_id.raw(), o, d));
+            if let Ok(ClientMessage::PlaceScaffold { pos }) = bincode::deserialize::<ClientMessage>(&raw) {
+                let p = Vec3::new(pos[0], pos[1], pos[2]);
+                pending.0.push((client_id.raw(), p));
             } else if let Ok(ClientMessage::Input(frame)) = bincode::deserialize::<ClientMessage>(&raw) {
                 last.0.insert(client_id.raw(), frame);
             }
@@ -688,22 +686,12 @@ fn process_scaffold_requests(
     if pending.0.is_empty() { return; }
     // マップが未準備なら後で再試行
     if !ready.0 { return; }
-    let requests: Vec<(u64, Vec3, Vec3)> = pending.0.drain(..).collect();
-    for (owner, origin_in, dir_in) in requests {
+    let requests: Vec<(u64, Vec3)> = pending.0.drain(..).collect();
+    for (owner, place_in) in requests {
         // プレイヤー状態やエンティティがまだ未登録なら再試行キューへ戻す
-        let Some(_pstate) = players.states.get(&owner) else { pending.0.push((owner, origin_in, dir_in)); continue };
-        let dir = if dir_in.length_squared() > 1e-6 { dir_in.normalize() } else { continue };
-        let Some(&p_ent) = ents.0.get(&owner) else { pending.0.push((owner, origin_in, dir_in)); continue };
-        let origin = origin_in;
-
-        let mut hit_pos = origin + dir * SCAFFOLD_RANGE;
-        // 既存の足場コライダを除外して、床や地形に正しく投影する
-        let mut qf = QueryFilter::default().exclude_collider(p_ent).exclude_sensors();
-        for &e in sc_ents.0.values() { qf = qf.exclude_collider(e); }
-        if let Some((_entity, toi)) = rapier.cast_ray(origin, dir, SCAFFOLD_RANGE, true, qf) {
-            hit_pos = origin + dir * toi;
-        }
-        let mut place = hit_pos + Vec3::Y * (SCAFFOLD_SIZE.y * 0.5 + 0.01);
+        let Some(_pstate) = players.states.get(&owner) else { pending.0.push((owner, place_in)); continue };
+        let Some(&_p_ent) = ents.0.get(&owner) else { pending.0.push((owner, place_in)); continue };
+        let mut place = place_in;
 
         // --- 交差/近接チェック（所有者と重ならないように）
         if let Some(pst) = players.states.get(&owner) {
@@ -712,29 +700,7 @@ fn process_scaffold_requests(
             let half_extent = (SCAFFOLD_SIZE.x.max(SCAFFOLD_SIZE.z)) * 0.5;
             let margin = 0.06f32;
             let min_dist = player_radius + half_extent + margin;
-            let mut dvec = (place - ply).with_y(0.0);
-            let mut d = dvec.length();
-            if d < min_dist {
-                // 前方（視線）方向の水平成分を優先して、必要量を一度にスライド
-                let mut slide_dir = dir.with_y(0.0);
-                if slide_dir.length_squared() <= 1e-6 {
-                    // 視線がほぼ上下のときはプレイヤーから離れる方向を使用
-                    slide_dir = if dvec.length_squared() > 1e-6 { dvec.normalize() } else { Vec3::X };
-                } else {
-                    slide_dir = slide_dir.normalize();
-                }
-                let delta = (min_dist - d) + 0.02; // ほんの少し余裕
-                place += slide_dir * delta;
-                // 再計算（過剰に近いケースの最終確認）
-                d = (place - ply).with_y(0.0).length();
-                if d < min_dist {
-                    // まだ近すぎる場合は左右どちらかに小さく逃がす（単発）
-                    let left = Vec3::Y.cross(slide_dir).normalize_or_zero();
-                    if left.length_squared() > 1e-6 {
-                        place += left * (min_dist - d + 0.02);
-                    }
-                }
-            }
+            // クライアント単体ロジックと一致させるため、ここでは追加スライドを行わない
         }
 
         // per-owner limit (FIFO)
