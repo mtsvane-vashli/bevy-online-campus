@@ -681,16 +681,19 @@ fn process_scaffold_requests(
     mut server: ResMut<RenetServer>,
     players: Res<Players>,
     ents: Res<ServerEntities>,
-    last: Res<LastInputs>,
     rapier: Res<RapierContext>,
     mut next_sid: ResMut<NextScaffoldId>,
+    ready: Res<MapReady>,
 ) {
     if pending.0.is_empty() { return; }
+    // マップが未準備なら後で再試行
+    if !ready.0 { return; }
     let requests: Vec<(u64, Vec3, Vec3)> = pending.0.drain(..).collect();
     for (owner, origin_in, dir_in) in requests {
-        let Some(_pstate) = players.states.get(&owner) else { continue };
+        // プレイヤー状態やエンティティがまだ未登録なら再試行キューへ戻す
+        let Some(_pstate) = players.states.get(&owner) else { pending.0.push((owner, origin_in, dir_in)); continue };
         let dir = if dir_in.length_squared() > 1e-6 { dir_in.normalize() } else { continue };
-        let Some(&p_ent) = ents.0.get(&owner) else { continue };
+        let Some(&p_ent) = ents.0.get(&owner) else { pending.0.push((owner, origin_in, dir_in)); continue };
         let origin = origin_in;
 
         let mut hit_pos = origin + dir * SCAFFOLD_RANGE;
