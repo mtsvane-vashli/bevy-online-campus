@@ -192,6 +192,7 @@ fn main() {
             .after(handle_focus_events)
         )
         .add_systems(Update, net_recv_snapshot)
+        // replay_unconfirmed_inputs は reconcile_self に統合したため不要
         .add_systems(Update, net_recv_events)
         .add_systems(Update, reconcile_self)
         .add_systems(Update, hud_update_hp)
@@ -747,6 +748,13 @@ struct AuthoritativeSelf { pos: Option<Vec3>, yaw: Option<f32> }
 #[derive(Resource)]
 struct LocalHealth { hp: u16 }
 
+// 入力再適用のための最小バッファ/ACK（将来の拡張に備えた土台）
+#[derive(Resource, Default)]
+struct InputBuffer(std::collections::VecDeque<InputFrame>);
+
+#[derive(Resource, Default)]
+struct LastConfirmedSeq(Option<u32>);
+
 fn setup_net_client(mut commands: Commands) {
     let (client, transport, client_id) = new_client(None);
     commands.insert_resource(client);
@@ -760,6 +768,8 @@ fn setup_net_client(mut commands: Commands) {
     commands.insert_resource(ScoreVisible::default());
     commands.insert_resource(RoundUi::default());
     commands.insert_resource(LocalAmmo { ammo: 0, reloading: false });
+    commands.insert_resource(InputBuffer::default());
+    commands.insert_resource(LastConfirmedSeq::default());
 }
 
 // ===== Scaffold Systems =====
@@ -894,11 +904,14 @@ fn fps_update_system(
 }
 
 fn net_send_input(
+    time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     cam_q: Query<&PlayerCamera, With<Camera3d>>,
     mut client: ResMut<RenetClient>,
     mut seq: ResMut<InputSeq>,
+    mut buf: ResMut<InputBuffer>,
+    last_conf: Res<LastConfirmedSeq>,
 ) {
     let cam = if let Ok(c) = cam_q.get_single() { c } else { return };
     let mut mv = [0.0f32, 0.0f32];
@@ -910,7 +923,12 @@ fn net_send_input(
     let jump = keys.just_pressed(KeyCode::Space);
     let fire = buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF);
     seq.0 = seq.0.wrapping_add(1);
-    let frame = InputFrame { seq: seq.0, mv, run, jump, fire, yaw: cam.yaw, pitch: cam.pitch };
+    let dt = time.delta_seconds();
+    let frame = InputFrame { seq: seq.0, mv, run, jump, fire, yaw: cam.yaw, pitch: cam.pitch, dt };
+    buf.0.push_back(frame.clone());
+    if let Some(ack) = last_conf.0 {
+        while let Some(front) = buf.0.front() { if front.seq <= ack { buf.0.pop_front(); } else { break; } }
+    }
     if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) {
         let _ = client.send_message(CH_INPUT, bytes);
     }
@@ -926,12 +944,15 @@ fn net_recv_snapshot(
     mut self_auth: ResMut<AuthoritativeSelf>,
     mut kinds: ResMut<ActorKindsMap>,
     mut positions: ResMut<ActorPositions>,
+    mut last_conf: ResMut<LastConfirmedSeq>,
 ) {
     while let Some(raw) = client.receive_message(CH_SNAPSHOT) {
         if let Ok(ServerMessage::Snapshot(snap)) = bincode::deserialize::<ServerMessage>(&raw) {
             if matches!(std::env::var("NET_SNAPSHOT_LOG").ok(), Some(_)) && snap.players.len() > 0 {
                 info!("client: snapshot players={}", snap.players.len());
             }
+            // 入力ACK: このクライアントの直近確定seqを拾い、未確定バッファの整理に使う
+            if let Some((_id, seq)) = snap.acks.iter().find(|(id, _)| *id == local.id) { last_conf.0 = Some(*seq); }
             for p in snap.players {
                 kinds.0.insert(p.id, p.kind);
                 positions.0.insert(p.id, Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
@@ -1148,11 +1169,31 @@ fn reconcile_self(
     time: Res<Time>,
     mut q: Query<&mut Transform, With<Player>>,
     self_auth: Res<AuthoritativeSelf>,
+    buf: Res<InputBuffer>,
 ) {
     // Default: enable light position reconciliation. Set RECONCILE_POS=0 to disable.
     if matches!(std::env::var("RECONCILE_POS").ok().as_deref(), Some("0" | "false" | "FALSE")) { return; }
     let mut tf = if let Ok(t) = q.get_single_mut() { t } else { return };
-    if let Some(target) = self_auth.pos {
+    if let Some(base) = self_auth.pos {
+        // 未確定入力を再適用した予測ターゲットを作る（簡易）
+        let mut target = base;
+        if !buf.0.is_empty() {
+            let mut vy = 0.0f32;
+            let mut used_jumps: u8 = 0;
+            for f in buf.0.iter() {
+                let mut horiz = Vec3::ZERO;
+                let input = Vec3::new(f.mv[0], 0.0, f.mv[1]);
+                if input.length_squared() > 1e-6 {
+                    let yaw_rot = Quat::from_rotation_y(f.yaw);
+                    horiz = (yaw_rot * input).normalize();
+                }
+                let mut speed = MOVE_SPEED;
+                if f.run { speed *= RUN_MULTIPLIER; }
+                if f.jump && (used_jumps == 0) { vy = JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
+                vy -= GRAVITY * f.dt;
+                target += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
+            }
+        }
         let diff = target - tf.translation;
         let d = diff.length();
         // Deadband: ignore tiny differences to avoid visible jitter.
@@ -1171,6 +1212,38 @@ fn reconcile_self(
         let step = (6.0 * time.delta_seconds()).min(1.0);
         tf.rotation = Quat::from_rotation_y(wrap_pi(current_yaw + delta * step));
     }
+}
+
+// 入力ACKを基点に、未確定入力を簡易再適用して視覚的な差し戻しを低減
+fn replay_unconfirmed_inputs(
+    self_auth: Res<AuthoritativeSelf>,
+    buf: Res<InputBuffer>,
+    mut q: Query<(&mut Transform, &mut Controller), With<Player>>,
+) {
+    if buf.0.is_empty() { return; }
+    let Some(base) = self_auth.pos else { return };
+    let Ok((mut tf, mut ctrl)) = q.get_single_mut() else { return };
+    // ベースをサーバ確定位置に置き、簡易再シム（衝突は考慮しない）
+    let mut pos = base;
+    let mut vy = 0.0f32;
+    let mut used_jumps: u8 = 0;
+    for f in buf.0.iter() {
+        let mut horiz = Vec3::ZERO;
+        let input = Vec3::new(f.mv[0], 0.0, f.mv[1]);
+        if input.length_squared() > 1e-6 {
+            let yaw_rot = Quat::from_rotation_y(f.yaw);
+            horiz = (yaw_rot * input).normalize();
+        }
+        let mut speed = MOVE_SPEED;
+        if f.run { speed *= RUN_MULTIPLIER; }
+        // jump
+        if f.jump && (used_jumps == 0) { vy = JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
+        // integrate
+        vy -= GRAVITY * f.dt;
+        pos += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
+    }
+    tf.translation = pos;
+    ctrl.vy = vy; // 目安として反映
 }
 
 fn scoreboard_toggle(
