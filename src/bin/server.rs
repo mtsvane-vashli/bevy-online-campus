@@ -307,10 +307,13 @@ fn accept_clients(
                 let jitter = Vec3::new((rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS, 0.0, (rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS);
                 spawn += jitter;
                 players.states.insert(id, PlayerState { pos: spawn, yaw: 0.0, hp: 100, alive: true, vy: 0.0, grounded: true });
+                let mut kcc = KinematicCharacterController::default();
+                kcc.autostep = Some(CharacterAutostep { max_height: CharacterLength::Absolute(0.5), min_width: CharacterLength::Absolute(0.3), include_dynamic_bodies: true });
+                kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
                 let ent = commands.spawn((
                     TransformBundle::from_transform(Transform::from_translation(spawn)),
                     Collider::capsule_y(0.6, 0.3),
-                    KinematicCharacterController::default(),
+                    kcc,
                 )).id();
                 ents.0.insert(id, ent);
                 info!("server: inserted player state for {} (total={})", id, players.states.len());
@@ -380,11 +383,14 @@ fn ensure_bots(
         let jitter = Vec3::new((rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS, 0.0, (rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS);
         pos += jitter;
         bots.states.insert(id, BotState { pos, yaw: 0.0, hp: 100, alive: true, vy: 0.0, grounded: true });
-        let ent = commands.spawn((
-            TransformBundle::from_transform(Transform::from_translation(pos)),
-            Collider::capsule_y(0.6, 0.3),
-            KinematicCharacterController::default(),
-        )).id();
+    let mut kcc = KinematicCharacterController::default();
+    kcc.autostep = Some(CharacterAutostep { max_height: CharacterLength::Absolute(0.5), min_width: CharacterLength::Absolute(0.3), include_dynamic_bodies: true });
+    kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
+    let ent = commands.spawn((
+        TransformBundle::from_transform(Transform::from_translation(pos)),
+        Collider::capsule_y(0.6, 0.3),
+        kcc,
+    )).id();
         bot_ents.0.insert(id, ent);
         ents.0.insert(id, ent); // レイ判定用に共通Mapにも入れておく
         weapons.0.insert(id, WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
