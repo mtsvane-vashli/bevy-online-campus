@@ -185,7 +185,12 @@ fn main() {
         .add_systems(Update, bullet_move_and_despawn)
         .add_systems(Update, add_mesh_colliders_for_map)
         .add_systems(Update, net_log_connection)
-        .add_systems(Update, net_send_input)
+        .add_systems(Update, net_send_input
+            .after(mouse_look_system)
+            .after(keyboard_look_system)
+            .after(cursor_lock_controls)
+            .after(handle_focus_events)
+        )
         .add_systems(Update, net_recv_snapshot)
         .add_systems(Update, net_recv_events)
         .add_systems(Update, reconcile_self)
