@@ -6,6 +6,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::window::CursorGrabMode;
 use bevy::window::WindowFocused;
 use bevy_rapier3d::prelude::*;
+use bevy::ecs::system::SystemParam;
 use bevy_renet::RenetClientPlugin;
 use bevy_renet::transport::NetcodeClientPlugin;
 use bevy_renet::renet::RenetClient;
@@ -131,6 +132,21 @@ struct Scaffold { hp: i32, life: Timer, owner: u64 }
 #[derive(Resource, Default)]
 struct LocalScaffolds(Vec<Entity>); // FIFO 管理（ローカルプレイヤー用）
 
+// ネット同期された足場（サーバ権威）
+#[derive(Component)]
+struct NetScaffold { sid: u64 }
+
+#[derive(Resource, Default)]
+struct NetScaffoldMap(std::collections::HashMap<u64, Entity>);
+
+#[derive(SystemParam)]
+struct NetScaffoldAssets<'w, 's> {
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    map: ResMut<'w, NetScaffoldMap>,
+    _marker: std::marker::PhantomData<&'s ()>,
+}
+
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
@@ -142,6 +158,7 @@ fn main() {
         .insert_resource(ActorKindsMap::default())
         .insert_resource(ActorPositions::default())
         .insert_resource(LocalScaffolds::default())
+        .insert_resource(NetScaffoldMap::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Bevy FPS".into(),
@@ -158,28 +175,26 @@ fn main() {
             // RapierDebugRenderPlugin::default(),
         ))
         .add_systems(Startup, (setup_world, setup_ui, setup_physics, setup_net_client, setup_player, setup_hud))
-        .add_systems(Update, (
-            handle_focus_events,
-            cursor_lock_controls,
-            mouse_look_system,
-            keyboard_look_system,
-            kcc_move_system,
-            kcc_post_step_system,
-            shoot_system,
-            bullet_move_and_despawn,
-            add_mesh_colliders_for_map,
-            net_log_connection,
-            net_send_input,
-            net_recv_snapshot,
-            net_recv_events,
-            reconcile_self,
-            hud_update_hp,
-            hud_tick_hit_marker,
-            hud_tick_killlog,
-            hud_update_ammo,
-            fps_update_system,
-            scaffold_input_system,
-        ))
+        .add_systems(Update, handle_focus_events)
+        .add_systems(Update, cursor_lock_controls)
+        .add_systems(Update, mouse_look_system)
+        .add_systems(Update, keyboard_look_system)
+        .add_systems(Update, kcc_move_system)
+        .add_systems(Update, kcc_post_step_system)
+        .add_systems(Update, shoot_system)
+        .add_systems(Update, bullet_move_and_despawn)
+        .add_systems(Update, add_mesh_colliders_for_map)
+        .add_systems(Update, net_log_connection)
+        .add_systems(Update, net_send_input)
+        .add_systems(Update, net_recv_snapshot)
+        .add_systems(Update, net_recv_events)
+        .add_systems(Update, reconcile_self)
+        .add_systems(Update, hud_update_hp)
+        .add_systems(Update, hud_tick_hit_marker)
+        .add_systems(Update, hud_tick_killlog)
+        .add_systems(Update, hud_update_ammo)
+        .add_systems(Update, fps_update_system)
+        .add_systems(Update, scaffold_input_system)
         .add_systems(Update, (vfx_tick_and_cleanup, scaffold_tick_and_cleanup))
         .run();
 }
@@ -753,8 +768,22 @@ fn scaffold_input_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     local_id: Res<LocalNetInfo>,
     mut owned: ResMut<LocalScaffolds>,
+    mut client: ResMut<RenetClient>,
 ) {
     if !keys.just_pressed(KeyCode::KeyQ) { return; }
+
+    // 接続中はローカル生成せず、サーバへ生成要求のみ送る
+    if client.is_connected() {
+        let cam_g = if let Ok(v) = cam_q.get_single() { v } else { return };
+        let origin = cam_g.translation();
+        let dir: Vec3 = cam_g.forward().into();
+        if dir.length_squared() < 1e-6 { return; }
+        if let Ok(bytes) = bincode::serialize(&ClientMessage::PlaceScaffold { origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] }) {
+            // 順序保証のあるイベントチャネルで送る
+            let _ = client.send_message(CH_RELIABLE, bytes);
+        }
+        return;
+    }
     let cam_g = if let Ok(v) = cam_q.get_single() { v } else { return };
     let player_ent = if let Ok(e) = player_q.get_single() { e } else { return };
 
@@ -935,8 +964,7 @@ fn net_recv_events(
     mut commands: Commands,
     mut client: ResMut<RenetClient>,
     mut remap: ResMut<RemoteMap>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut sc_assets: NetScaffoldAssets,
     local: Res<LocalNetInfo>,
     mut self_auth: ResMut<AuthoritativeSelf>,
     mut my_hp: ResMut<LocalHealth>,
@@ -970,8 +998,8 @@ fn net_recv_events(
                                 ec.insert(Transform::from_translation(p));
                             }
                         } else {
-                            let mesh = meshes.add(Cuboid::new(0.4, 1.8, 0.4));
-                            let mat = materials.add(match kind { ActorKind::Human => Color::srgb(0.2, 0.9, 0.3), ActorKind::Bot => Color::srgb(0.9, 0.2, 0.2) });
+                            let mesh = sc_assets.meshes.add(Cuboid::new(0.4, 1.8, 0.4));
+                            let mat = sc_assets.materials.add(match kind { ActorKind::Human => Color::srgb(0.2, 0.9, 0.3), ActorKind::Bot => Color::srgb(0.9, 0.2, 0.2) });
                             let ent = commands.spawn((PbrBundle { mesh, material: mat, transform: Transform::from_translation(p), ..default() }, RemoteAvatar { id })).id();
                             remap.0.insert(id, ent);
                         }
@@ -1026,20 +1054,20 @@ fn net_recv_events(
                     let end = match hit { Some(h) => Vec3::new(h[0], h[1], h[2]), None => o + d * 50.0 };
                     let col = match kinds.0.get(&id).copied() { Some(ActorKind::Bot) => Color::srgb(0.95, 0.25, 0.2), _ => Color::srgb(0.95, 0.9, 0.2) };
                     // muzzle
-                    let mmesh = meshes.add(Cuboid::new(0.06, 0.06, 0.06));
-                    let mmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
+                    let mmesh = sc_assets.meshes.add(Cuboid::new(0.06, 0.06, 0.06));
+                    let mmat = sc_assets.materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
                     commands.spawn((PbrBundle { mesh: mmesh, material: mmat, transform: Transform::from_translation(o), ..default() }, MuzzleFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
                     // tracer
                     let seg = end - o; let len = seg.length();
                     if len > 0.001 {
-                        let tmesh = meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
-                        let tmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
+                        let tmesh = sc_assets.meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
+                        let tmat = sc_assets.materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
                         let rot = Quat::from_rotation_arc(Vec3::Z, seg.normalize());
                         let pos = o + seg * 0.5;
                         commands.spawn((PbrBundle { mesh: tmesh, material: tmat, transform: Transform { translation: pos, rotation: rot, scale: Vec3::ONE }, ..default() }, TracerFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
                     }
                     // impact
-                    if let Some(h) = hit { let hp = Vec3::new(h[0], h[1], h[2]); let imesh = meshes.add(Cuboid::new(0.05, 0.05, 0.02)); let imat = materials.add(StandardMaterial { base_color: Color::srgb(1.0, 0.6, 0.3), emissive: Color::srgb(1.0, 0.6, 0.3).into(), unlit: true, ..default() }); commands.spawn((PbrBundle { mesh: imesh, material: imat, transform: Transform::from_translation(hp), ..default() }, ImpactFx { timer: Timer::from_seconds(0.2, TimerMode::Once) })); }
+                    if let Some(h) = hit { let hp = Vec3::new(h[0], h[1], h[2]); let imesh = sc_assets.meshes.add(Cuboid::new(0.05, 0.05, 0.02)); let imat = sc_assets.materials.add(StandardMaterial { base_color: Color::srgb(1.0, 0.6, 0.3), emissive: Color::srgb(1.0, 0.6, 0.3).into(), unlit: true, ..default() }); commands.spawn((PbrBundle { mesh: imesh, material: imat, transform: Transform::from_translation(hp), ..default() }, ImpactFx { timer: Timer::from_seconds(0.2, TimerMode::Once) })); }
                 }
                 EventMsg::RoundStart { time_left_sec } => {
                     round_ui.phase_end = None;
@@ -1054,6 +1082,32 @@ fn net_recv_events(
                     if id == local.id {
                         local_ammo.ammo = ammo;
                         local_ammo.reloading = reloading;
+                    }
+                }
+                EventMsg::ScaffoldSpawn { sid, owner: _owner, pos } => {
+                    let p = Vec3::new(pos[0], pos[1], pos[2]);
+                    let mesh = sc_assets.meshes.add(Cuboid::new(SCAFFOLD_SIZE.x, SCAFFOLD_SIZE.y, SCAFFOLD_SIZE.z));
+                    let col = Color::srgba(0.2, 0.9, 1.0, 0.45);
+                    let mat = sc_assets.materials.add(StandardMaterial {
+                        base_color: col,
+                        emissive: Color::srgb(0.3, 0.8, 1.0).into(),
+                        alpha_mode: AlphaMode::Blend,
+                        unlit: true,
+                        ..default()
+                    });
+                    let ent = commands
+                        .spawn((
+                            PbrBundle { mesh, material: mat, transform: Transform::from_translation(p), ..default() },
+                            NetScaffold { sid },
+                            Collider::cuboid(SCAFFOLD_SIZE.x * 0.5, SCAFFOLD_SIZE.y * 0.5, SCAFFOLD_SIZE.z * 0.5),
+                            RigidBody::Fixed,
+                        ))
+                        .id();
+                    sc_assets.map.0.insert(sid, ent);
+                }
+                EventMsg::ScaffoldDespawn { sid } => {
+                    if let Some(ent) = sc_assets.map.0.remove(&sid) {
+                        commands.entity(ent).despawn_recursive();
                     }
                 }
             },
