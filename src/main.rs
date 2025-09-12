@@ -789,12 +789,24 @@ fn scaffold_input_system(
 
     // 接続中はローカル生成せず、サーバへ生成要求のみ送る
     if client.is_connected() {
+        // クライアント単体時と同じロジックでヒット点を出し、最終配置座標を送る
         let cam_g = if let Ok(v) = cam_q.get_single() { v } else { return };
+        let player_ent = if let Ok(e) = player_q.get_single() { e } else { return };
         let origin = cam_g.translation();
         let dir: Vec3 = cam_g.forward().into();
         if dir.length_squared() < 1e-6 { return; }
-        if let Ok(bytes) = bincode::serialize(&ClientMessage::PlaceScaffold { origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] }) {
-            // 順序保証のあるイベントチャネルで送る
+        let mut hit_pos = origin + dir * SCAFFOLD_RANGE;
+        if let Some((_entity, toi)) = rapier.cast_ray(
+            origin,
+            dir,
+            SCAFFOLD_RANGE,
+            true,
+            QueryFilter::default().exclude_collider(player_ent).exclude_sensors(),
+        ) {
+            hit_pos = origin + dir * toi;
+        }
+        let place_pos = hit_pos + Vec3::Y * (SCAFFOLD_SIZE.y * 0.5 + 0.01);
+        if let Ok(bytes) = bincode::serialize(&ClientMessage::PlaceScaffold { pos: [place_pos.x, place_pos.y, place_pos.z] }) {
             let _ = client.send_message(CH_RELIABLE, bytes);
         }
         return;
