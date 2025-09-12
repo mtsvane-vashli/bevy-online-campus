@@ -920,12 +920,14 @@ fn net_send_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     cam_q: Query<&PlayerCamera, With<Camera3d>>,
+    cam_tf_q: Query<&GlobalTransform, With<Camera3d>>,
     mut client: ResMut<RenetClient>,
     mut seq: ResMut<InputSeq>,
     mut buf: ResMut<InputBuffer>,
     last_conf: Res<LastConfirmedSeq>,
 ) {
     let cam = if let Ok(c) = cam_q.get_single() { c } else { return };
+    let cam_tf = if let Ok(t) = cam_tf_q.get_single() { t } else { return };
     let mut mv = [0.0f32, 0.0f32];
     if keys.pressed(KeyCode::KeyW) { mv[1] -= 1.0; }
     if keys.pressed(KeyCode::KeyS) { mv[1] += 1.0; }
@@ -941,8 +943,16 @@ fn net_send_input(
     if let Some(ack) = last_conf.0 {
         while let Some(front) = buf.0.front() { if front.seq <= ack { buf.0.pop_front(); } else { break; } }
     }
-    if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) {
-        let _ = client.send_message(CH_INPUT, bytes);
+    if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) { let _ = client.send_message(CH_INPUT, bytes); }
+    // 射撃要求はカメラの原点・方向を添えて信頼チャネルで即送信
+    if fire {
+        let origin = cam_tf.translation();
+        let dir: Vec3 = cam_tf.forward().into();
+        if dir.length_squared() > 1e-6 {
+            if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire { origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] }) {
+                let _ = client.send_message(CH_RELIABLE, bytes);
+            }
+        }
     }
 }
 
