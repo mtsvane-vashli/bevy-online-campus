@@ -82,6 +82,15 @@ pub enum ActorKind { Human, Bot }
 
 pub fn connection_config() -> ConnectionConfig { ConnectionConfig::default() }
 
+// 共有定数（クライアント/サーバ双方で使用するゲームパラメータ）
+pub mod shared {
+    pub const MOVE_SPEED: f32 = 6.0;
+    pub const RUN_MULTIPLIER: f32 = 1.7;
+    pub const ADS_SPEED_MUL: f32 = 0.6;
+    pub const GRAVITY: f32 = 9.81;
+    pub const JUMP_SPEED: f32 = 5.2;
+}
+
 pub fn new_server() -> (RenetServer, NetcodeServerTransport) {
     let server = RenetServer::new(connection_config());
     // SERVER_ADDR=host:port があればそれを広告先にし、ポートも合わせてバインド
