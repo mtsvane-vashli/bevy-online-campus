@@ -19,6 +19,7 @@ pub struct InputFrame {
     pub run: bool,
     pub jump: bool,
     pub fire: bool,
+    pub ads: bool,
     pub yaw: f32,
     pub pitch: f32,
     pub dt: f32,
