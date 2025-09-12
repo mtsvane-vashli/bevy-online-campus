@@ -47,6 +47,8 @@ pub enum ClientMessage {
     Input(InputFrame),
     // クライアントが足場生成を要求（最終配置座標を送る：クライアント側と同一計算）
     PlaceScaffold { pos: [f32; 3] },
+    // 射撃要求（クライアントのカメラ原点・方向を送る）
+    Fire { origin: [f32; 3], dir: [f32; 3] },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

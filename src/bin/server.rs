@@ -66,6 +66,23 @@ struct WpnProt<'w> {
     weapons: ResMut<'w, Weapons>,
 }
 
+#[derive(SystemParam)]
+struct ShootRes<'w> {
+    last: Res<'w, LastInputs>,
+    last_fire: ResMut<'w, LastFireSeq>,
+    respawns: ResMut<'w, RespawnTimers>,
+    bot_respawns: ResMut<'w, BotRespawnTimers>,
+    server: ResMut<'w, RenetServer>,
+    rapier: Res<'w, RapierContext>,
+    ents: Res<'w, ServerEntities>,
+    bot_ents: Res<'w, BotEntities>,
+    scores: ResMut<'w, Scores>,
+    round: Res<'w, RoundState>,
+    spawns: Res<'w, SpawnPoints>,
+    fires: ResMut<'w, PendingFires>,
+    wpnprot: WpnProt<'w>,
+}
+
 #[derive(Resource, Default)]
 struct BotWander(HashMap<u64, (Vec3, f32)>); // (target, timer)
 
@@ -190,6 +207,9 @@ struct NextScaffoldId(u64);
 #[derive(Resource, Default)]
 struct PendingScaffold(Vec<(u64, Vec3)>); // (owner, final_pos)
 
+#[derive(Resource, Default)]
+struct PendingFires(Vec<(u64, Vec3, Vec3)>); // (shooter_id, origin, dir)
+
 fn main() {
     App::new()
         // ヘッドレス運用: WinitPlugin（X/Wayland依存のイベントループ）を無効化
@@ -238,6 +258,7 @@ fn main() {
         .insert_resource(ScaffoldEntities::default())
         .insert_resource(NextScaffoldId(2_000_000_000_000))
         .insert_resource(PendingScaffold::default())
+        .insert_resource(PendingFires::default())
         .add_systems(Startup, (setup_server, setup_map))
         .add_systems(Update, (accept_clients, add_mesh_colliders_for_map, collect_spawn_points_from_map, ensure_bots, log_clients_count))
         .add_systems(Update, sync_players_with_connections)
@@ -248,12 +269,12 @@ fn main() {
         .add_systems(FixedUpdate, bot_kcc_move_fsm.before(PhysicsSet::StepSimulation))
         .add_systems(FixedUpdate, srv_kcc_post.after(PhysicsSet::Writeback))
         .add_systems(FixedUpdate, bot_kcc_post.after(PhysicsSet::Writeback))
-        .add_systems(FixedUpdate, srv_shoot_and_respawn.after(srv_kcc_post))
-        .add_systems(FixedUpdate, process_scaffold_requests.after(srv_shoot_and_respawn))
-        .add_systems(FixedUpdate, scaffold_tick_and_cleanup_srv.after(process_scaffold_requests))
-        .add_systems(FixedUpdate, bot_ai_shoot_and_respawn.after(srv_shoot_and_respawn))
-        .add_systems(FixedUpdate, broadcast_snapshots.after(bot_ai_shoot_and_respawn))
-        .add_systems(FixedUpdate, round_update.after(broadcast_snapshots))
+        .add_systems(FixedUpdate, srv_shoot_and_respawn)
+        .add_systems(FixedUpdate, process_scaffold_requests)
+        .add_systems(FixedUpdate, scaffold_tick_and_cleanup_srv)
+        .add_systems(FixedUpdate, bot_ai_shoot_and_respawn)
+        .add_systems(FixedUpdate, broadcast_snapshots)
+        .add_systems(FixedUpdate, round_update)
         .run();
 }
 
@@ -377,17 +398,27 @@ fn ensure_bots(
     }
 }
 
-fn recv_inputs(mut server: ResMut<RenetServer>, mut last: ResMut<LastInputs>, mut pending: ResMut<PendingScaffold>) {
+fn recv_inputs(
+    mut server: ResMut<RenetServer>,
+    mut last: ResMut<LastInputs>,
+    mut pending: ResMut<PendingScaffold>,
+    mut fires: ResMut<PendingFires>,
+) {
     for client_id in server.clients_id().iter().copied().collect::<Vec<ClientId>>() {
         while let Some(raw) = server.receive_message(client_id, CH_INPUT) {
             if let Ok(msg) = bincode::deserialize::<ClientMessage>(&raw) {
                 match msg {
                     ClientMessage::Input(frame) => {
-                        last.0.insert(client_id.raw(), frame);
-                    }
+                last.0.insert(client_id.raw(), frame);
+                }
                     ClientMessage::PlaceScaffold { pos } => {
                         let p = Vec3::new(pos[0], pos[1], pos[2]);
                         pending.0.push((client_id.raw(), p));
+                    }
+                    ClientMessage::Fire { origin, dir } => {
+                        let o = Vec3::new(origin[0], origin[1], origin[2]);
+                        let d = Vec3::new(dir[0], dir[1], dir[2]);
+                        fires.0.push((client_id.raw(), o, d));
                     }
                 }
             }
@@ -397,6 +428,10 @@ fn recv_inputs(mut server: ResMut<RenetServer>, mut last: ResMut<LastInputs>, mu
             if let Ok(ClientMessage::PlaceScaffold { pos }) = bincode::deserialize::<ClientMessage>(&raw) {
                 let p = Vec3::new(pos[0], pos[1], pos[2]);
                 pending.0.push((client_id.raw(), p));
+            } else if let Ok(ClientMessage::Fire { origin, dir }) = bincode::deserialize::<ClientMessage>(&raw) {
+                let o = Vec3::new(origin[0], origin[1], origin[2]);
+                let d = Vec3::new(dir[0], dir[1], dir[2]);
+                fires.0.push((client_id.raw(), o, d));
             } else if let Ok(ClientMessage::Input(frame)) = bincode::deserialize::<ClientMessage>(&raw) {
                 last.0.insert(client_id.raw(), frame);
             }
@@ -944,23 +979,12 @@ fn srv_shoot_and_respawn(
     time_fixed: Res<Time<Fixed>>,
     mut players: ResMut<Players>,
     mut bots: ResMut<Bots>,
-    last: Res<LastInputs>,
-    mut last_fire: ResMut<LastFireSeq>,
-    mut respawns: ResMut<RespawnTimers>,
-    mut bot_respawns: ResMut<BotRespawnTimers>,
-    mut server: ResMut<RenetServer>,
-    rapier: Res<RapierContext>,
-    ents: Res<ServerEntities>,
-    bot_ents: Res<BotEntities>,
-    mut scores: ResMut<Scores>,
-    round: Res<RoundState>,
-    spawns: Res<SpawnPoints>,
-    mut wpnprot: WpnProt,
+    mut s: ShootRes,
 ) {
-    if round.phase != RoundPhase::Active { return; }
+    if s.round.phase != RoundPhase::Active { return; }
     let dt = time_fixed.delta_seconds();
     // tick weapon timers
-    for (id, w) in wpnprot.weapons.0.iter_mut() {
+    for (id, w) in s.wpnprot.weapons.0.iter_mut() {
         if w.cooldown > 0.0 { w.cooldown = (w.cooldown - dt).max(0.0); }
         if w.reload > 0.0 {
             w.reload = (w.reload - dt).max(0.0);
@@ -968,21 +992,66 @@ fn srv_shoot_and_respawn(
                 w.ammo = MAG_SIZE;
                 // notify reload complete
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id: *id, ammo: w.ammo, reloading: false })) {
-                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                    for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                 }
             }
         }
     }
     // immutable snapshot of states for safe iteration (humans + bots)
+    // ローカルエイリアス（既存コードの参照名を維持）
+    let last_fire = &mut s.last_fire;
+    let rapier = &s.rapier;
+    let respawns = &mut s.respawns;
+    let bot_respawns = &mut s.bot_respawns;
+    let wpnprot = &mut s.wpnprot;
+    let ents = &s.ents;
+    let bot_ents = &s.bot_ents;
+    let scores = &mut s.scores;
+    let round = &s.round;
+    let spawns = &s.spawns;
+
     let mut snap: Vec<(u64, Vec3, bool)> = players
         .states
         .iter()
         .map(|(id, s)| (*id, s.pos, s.alive))
         .collect();
     snap.extend(bots.states.iter().map(|(id, s)| (*id, s.pos, s.alive)));
+    // 当Tickに受領したクライアント由来の射撃をマップへ
+    let mut firemap: std::collections::HashMap<u64, (Vec3, Vec3)> = std::collections::HashMap::new();
+    for (sid, o, d) in s.fires.0.drain(..) {
+        if d.length_squared() > 1e-6 { firemap.insert(sid, (o, d.normalize())); }
+    }
 
     for (id, pos, alive) in snap.iter().copied() {
-        let Some(inp) = last.0.get(&id) else { continue };
+        let Some(inp) = s.last.0.get(&id) else { continue };
+        // クライアント由来の射撃（origin/dir）があれば優先処理し、以降の通常フローはスキップ
+        if let Some((origin, forward)) = firemap.remove(&id) {
+            let w = wpnprot.weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
+            let last_seq = last_fire.0.entry(id).or_insert(0);
+            *last_seq = inp.seq;
+            if w.reload <= 0.0 && w.cooldown <= 0.0 && w.ammo > 0 && wpnprot.protect.0.get(&id).copied().unwrap_or(0.0) <= 0.0 {
+                w.ammo = w.ammo.saturating_sub(1); w.cooldown = FIRE_COOLDOWN;
+                if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: w.ammo, reloading: false })) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+                let mut filter = QueryFilter::default(); if let Some(&self_ent) = ents.0.get(&id) { filter = filter.exclude_collider(self_ent); }
+                let mut hit_point: Option<[f32;3]> = None; let mut hit_id_opt: Option<u64> = None;
+                if let Some((hit_ent, toi)) = rapier.cast_ray(origin, forward, 100.0, true, filter) {
+                    hit_point = Some([origin.x + forward.x * toi, origin.y + forward.y * toi, origin.z + forward.z * toi]);
+                    if let Some(pid) = ents.0.iter().find_map(|(pid, &e)| if e==hit_ent { Some(*pid) } else { None }) { hit_id_opt = Some(pid); }
+                    if let Some(bid) = bot_ents.0.iter().find_map(|(bid, &e)| if e==hit_ent { Some(*bid) } else { None }) { hit_id_opt = Some(bid); }
+                }
+                if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire { id, origin: [origin.x, origin.y, origin.z], dir: [forward.x, forward.y, forward.z], hit: hit_point })) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+                if let Some(hit_id) = hit_id_opt {
+                    if wpnprot.protect.0.get(&hit_id).copied().unwrap_or(0.0) <= 0.0 {
+                        if let Some(hit) = players.states.get_mut(&hit_id) {
+                            if hit.alive { let dmg = 35u16; hit.hp = hit.hp.saturating_sub(dmg); let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id }); let bytes = bincode::serialize(&ev).unwrap(); for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } if hit.hp == 0 { hit.alive = false; let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id }); let bytes = bincode::serialize(&ev).unwrap(); for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } respawns.0.insert(hit_id, 2.0); if players.states.contains_key(&id) { let e = scores.0.entry(id).or_insert((0,0)); e.0 = e.0.saturating_add(1); } } }
+                        } else if let Some(hit) = bots.states.get_mut(&hit_id) {
+                            if hit.alive { let dmg = 35u16; hit.hp = hit.hp.saturating_sub(dmg); let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id }); let bytes = bincode::serialize(&ev).unwrap(); for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } if hit.hp == 0 { hit.alive = false; let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id }); let bytes = bincode::serialize(&ev).unwrap(); for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } bot_respawns.0.insert(hit_id, 2.0); } }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let w = wpnprot.weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
         let last_seq = last_fire.0.entry(id).or_insert(0);
         if inp.fire && inp.seq != *last_seq && alive {
@@ -995,7 +1064,7 @@ fn srv_shoot_and_respawn(
                 // start reload
                 if w.reload <= 0.0 { w.reload = RELOAD_TIME; }
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: w.ammo, reloading: true })) {
-                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                    for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                 }
                 continue;
             }
@@ -1003,7 +1072,7 @@ fn srv_shoot_and_respawn(
             w.ammo = w.ammo.saturating_sub(1);
             w.cooldown = FIRE_COOLDOWN;
             if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: w.ammo, reloading: false })) {
-                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
             }
             let yaw_rot = Quat::from_rotation_y(inp.yaw);
             let pitch_rot = Quat::from_rotation_x(inp.pitch);
@@ -1017,7 +1086,7 @@ fn srv_shoot_and_respawn(
                 Some([origin.x + forward.x * toi, origin.y + forward.y * toi, origin.z + forward.z * toi])
             } else { None };
             if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire { id, origin: [origin.x, origin.y, origin.z], dir: [forward.x, forward.y, forward.z], hit: hit_opt })) {
-                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
             }
             let mut best: Option<(u64, f32)> = None;
             for (oid, opos, oalive) in snap.iter().copied() {
@@ -1048,26 +1117,26 @@ fn srv_shoot_and_respawn(
                         hit.hp = hit.hp.saturating_sub(dmg);
                         let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id });
                         let bytes = bincode::serialize(&ev).unwrap();
-                        for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                        for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                         if hit.hp == 0 {
                             hit.alive = false;
                             let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id });
                             let bytes = bincode::serialize(&ev).unwrap();
-                            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                            for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                             respawns.0.insert(hit_id, 2.0);
                             // update scores and broadcast（人間のみスコア集計）
                             if players.states.contains_key(&id) { let e = scores.0.entry(id).or_insert((0,0)); e.0 = e.0.saturating_add(1); }
                             if players.states.contains_key(&hit_id) { let e2 = scores.0.entry(hit_id).or_insert((0,0)); e2.1 = e2.1.saturating_add(1); }
                             let table: Vec<ScoreEntry> = scores.0.iter().map(|(id,(k,d))| ScoreEntry{ id:*id, kills:*k as u32, deaths:*d as u32}).collect();
                             if let Ok(bytes) = bincode::serialize(&ServerMessage::Score(table)) {
-                                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                                for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                             }
                             // auto reload on kill if empty and not already reloading
                             let ww = wpnprot.weapons.0.entry(id).or_insert(WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
                             if ww.ammo == 0 && ww.reload <= 0.0 {
                                 ww.reload = RELOAD_TIME;
                                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: ww.ammo, reloading: true })) {
-                                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                                    for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                                 }
                             }
                         }
@@ -1078,12 +1147,12 @@ fn srv_shoot_and_respawn(
                         hit.hp = hit.hp.saturating_sub(dmg);
                         let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id });
                         let bytes = bincode::serialize(&ev).unwrap();
-                        for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                        for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                         if hit.hp == 0 {
                             hit.alive = false;
                             let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id });
                             let bytes = bincode::serialize(&ev).unwrap();
-                            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                            for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
                             bot_respawns.0.insert(hit_id, 2.0);
                         }
                     }
@@ -1115,13 +1184,13 @@ fn srv_shoot_and_respawn(
             wpnprot.protect.0.insert(pid, PROTECT_SEC);
             let ev = ServerMessage::Event(EventMsg::Spawn { id: pid, pos: [p.pos.x, p.pos.y, p.pos.z], kind: ActorKind::Human });
             let bytes = bincode::serialize(&ev).unwrap();
-            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
         }
         // reset weapon
         let w = wpnprot.weapons.0.entry(pid).or_insert(WeaponStatus::default());
         *w = WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 };
         if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id: pid, ammo: MAG_SIZE, reloading: false })) {
-            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
         }
     }
 }
