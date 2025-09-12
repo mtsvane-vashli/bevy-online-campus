@@ -171,6 +171,7 @@ const DESIRED_BOTS: usize = 1;
 const BOT_SPAWN_COOLDOWN: f32 = 2.0;
 const BOT_ID_START: u64 = 1_000_000_000_000; // 衝突低確率な帯を使用
 const BOT_MOVE_SPEED: f32 = 5.5;
+const ADS_SPEED_MUL: f32 = 0.6; // クライアントと一致させる
 const BOT_FIRE_RANGE: f32 = 60.0;
 const BOT_FOV_COS: f32 = 0.5; // 約60度（厳しめに）
 const BOT_TURN_RATE: f32 = 6.0; // rad/s: 向き直り速度
@@ -464,6 +465,7 @@ fn srv_kcc_move(
             }
             let mut speed = 6.0;
             if inp.run { speed *= 1.7; }
+            if inp.ads { speed *= ADS_SPEED_MUL; }
             let mut vy = state.vy - 9.81 * dt;
             if inp.jump {
                 let used = jumps.0.entry(*id).or_insert(0);
