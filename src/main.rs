@@ -111,6 +111,10 @@ struct Controller {
     vy: f32,
     on_ground: bool,
     jumps: u8, // 空中で使ったジャンプ回数（2段ジャンプ用）
+    // サーバと整合するための簡易バッファ/コヨーテ/クールダウン
+    jump_buf: f32,
+    coyote: f32,
+    jump_cd: f32,
 }
 
 #[derive(Resource, Default)]
@@ -185,7 +189,7 @@ fn main() {
         .add_systems(Update, mouse_look_system)
         .add_systems(Update, ads_zoom_system)
         .add_systems(Update, keyboard_look_system)
-        .add_systems(Update, kcc_move_system)
+        .add_systems(Update, kcc_move_system_unified)
         .add_systems(Update, kcc_post_step_system)
         .add_systems(Update, client_airborne_snap_control.after(kcc_post_step_system))
         // 見た目弾の生成/更新は削除
@@ -196,11 +200,12 @@ fn main() {
             .after(keyboard_look_system)
             .after(cursor_lock_controls)
             .after(handle_focus_events)
+            .after(net_recv_snapshot)
         )
         .add_systems(Update, net_recv_snapshot)
         // replay_unconfirmed_inputs は reconcile_self に統合したため不要
         .add_systems(Update, net_recv_events)
-        .add_systems(Update, reconcile_self.before(PhysicsSet::StepSimulation))
+        .add_systems(Update, reconcile_self.after(net_recv_snapshot).after(net_recv_events).before(PhysicsSet::StepSimulation))
         .add_systems(Update, hud_update_hp)
         .add_systems(Update, hud_tick_hit_marker)
         .add_systems(Update, hud_tick_killlog)
@@ -614,6 +619,56 @@ fn kcc_post_step_system(
             kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
         }
     }
+}
+
+// サーバ実装と整合したローカルKCC移動（ジャンプ品質を統一）
+fn kcc_move_system_unified(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    cam_q: Query<&PlayerCamera, With<Camera3d>>,
+    mut q: Query<(&mut KinematicCharacterController, &mut Controller), With<Player>>,
+    ready: Res<MapReady>,
+){
+    if !ready.0 { return; }
+    let (mut kcc, mut ctrl) = if let Ok(v) = q.get_single_mut() { v } else { return };
+    let cam = if let Ok(v) = cam_q.get_single() { v } else { return };
+
+    let mut input = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) { input += Vec3::NEG_Z; }
+    if keys.pressed(KeyCode::KeyS) { input += Vec3::Z; }
+    if keys.pressed(KeyCode::KeyA) { input += Vec3::NEG_X; }
+    if keys.pressed(KeyCode::KeyD) { input += Vec3::X; }
+
+    let mut horiz = Vec3::ZERO;
+    if input.length_squared() > 1e-6 {
+        let yaw_rot = Quat::from_rotation_y(cam.yaw);
+        horiz = (yaw_rot * input).normalize();
+    }
+
+    let mut speed = MOVE_SPEED;
+    if buttons.pressed(MouseButton::Right) { speed *= ADS_SPEED_MUL; }
+
+    use crate::net::shared::{JUMP_BUFFER_SEC, COYOTE_SEC, JUMP_COOLDOWN_SEC};
+    let dt = time.delta_seconds();
+    if keys.just_pressed(KeyCode::Space) { ctrl.jump_buf = JUMP_BUFFER_SEC; }
+    if ctrl.jump_buf > 0.0 { ctrl.jump_buf = (ctrl.jump_buf - dt).max(0.0); }
+    if ctrl.jump_cd > 0.0 { ctrl.jump_cd = (ctrl.jump_cd - dt).max(0.0); }
+    if ctrl.on_ground { ctrl.coyote = COYOTE_SEC; } else if ctrl.coyote > 0.0 { ctrl.coyote = (ctrl.coyote - dt).max(0.0); }
+
+    ctrl.vy -= GRAVITY * dt;
+    let mut jumped_now = false;
+    if ctrl.jump_buf > 0.0 && ctrl.jump_cd <= 0.0 {
+        if ctrl.on_ground || ctrl.coyote > 0.0 {
+            ctrl.vy = JUMP_SPEED; jumped_now = true; ctrl.jump_buf = 0.0;
+        } else if ctrl.jumps < 1 {
+            ctrl.vy = JUMP_SPEED; ctrl.jumps = ctrl.jumps.saturating_add(1); jumped_now = true; ctrl.jump_buf = 0.0;
+        }
+    }
+    if jumped_now { kcc.snap_to_ground = None; ctrl.on_ground = false; ctrl.jump_cd = JUMP_COOLDOWN_SEC; }
+
+    let motion = horiz * speed * dt + Vec3::Y * ctrl.vy * dt;
+    kcc.translation = Some(motion);
 }
 
 // 空中時は地面スナップを無効化して「地上にワープ」する補正を防ぐ。
@@ -1305,7 +1360,7 @@ fn reconcile_self(
                 return;
             }
             // Smooth correction within thresholds (collidable via KCC).
-            let rate = 6.0; // per second (softer to reduce rubberband feel)
+            let rate = 10.0; // per second (少し強めにして発散を抑える)
             let step = (rate * time.delta_seconds()).min(1.0);
             let mut corr = diff * step;
             if !grounded { corr.y = 0.0; }

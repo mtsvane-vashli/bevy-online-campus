@@ -284,6 +284,7 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(SnapshotTimer(Timer::from_seconds(1.0/30.0, TimerMode::Repeating)))
         .insert_resource(ServerLogTimer(Timer::from_seconds(1.0, TimerMode::Repeating)))
+        .insert_resource(SnapshotSeq::default())
         .insert_resource(PosHistory::default())
         .insert_resource(SimTime::default())
         .insert_resource(JumpBuffers::default())
@@ -1603,6 +1604,9 @@ struct SnapshotTimer(Timer);
 #[derive(Resource)]
 struct ServerLogTimer(Timer);
 
+#[derive(Resource, Default)]
+struct SnapshotSeq(u32);
+
 fn broadcast_snapshots(
     time_fixed: Res<Time<Fixed>>,
     mut timer: ResMut<SnapshotTimer>,
@@ -1610,6 +1614,7 @@ fn broadcast_snapshots(
     players: Res<Players>,
     bots: Res<Bots>,
     last: Res<LastInputs>,
+    mut seq: ResMut<SnapshotSeq>,
 ) {
     timer.0.tick(time_fixed.delta());
     if !timer.0.finished() { return; }
@@ -1642,7 +1647,8 @@ fn broadcast_snapshots(
     }
     let mut acks: Vec<(u64, u32)> = Vec::new();
     for (id, inp) in last.0.iter() { acks.push((*id, inp.seq)); }
-    let snap = SnapshotMsg { tick: 0, players: players_vec, acks };
+    let tick = { seq.0 = seq.0.wrapping_add(1); seq.0 };
+    let snap = SnapshotMsg { tick, players: players_vec, acks };
     if let Ok(bytes) = bincode::serialize(&ServerMessage::Snapshot(snap)) {
         for client_id in server.clients_id() {
             let _ = server.send_message(client_id, CH_SNAPSHOT, bytes.clone());
