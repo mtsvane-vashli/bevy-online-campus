@@ -354,8 +354,9 @@ fn accept_clients(
                 info!("server: inserted player state for {} (total={})", id, players.states.len());
                 // broadcast spawn
                 let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z], kind: ActorKind::Human });
-                let bytes = bincode::serialize(&ev).unwrap();
-                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                if let Ok(bytes) = bincode::serialize(&ev) {
+                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                }
                 scores.0.entry(id).or_insert((0,0));
                 weapons.0.insert(id, WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 });
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: MAG_SIZE, reloading: false })) { let _ = server.send_message(client_id, CH_RELIABLE, bytes); }
@@ -376,8 +377,9 @@ fn accept_clients(
                 players.states.remove(&id);
                 if let Some(e) = ents.0.remove(&id) { commands.entity(e).despawn_recursive(); }
                 let ev = ServerMessage::Event(EventMsg::Despawn { id });
-                let bytes = bincode::serialize(&ev).unwrap();
-                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                if let Ok(bytes) = bincode::serialize(&ev) {
+                    for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                }
                 info!("client disconnected: {} ({:?})", id, reason);
                 scores.0.remove(&id);
                 weapons.0.remove(&id);
@@ -1224,9 +1226,30 @@ fn srv_shoot_and_respawn(
                 if let Some(hit_id) = hit_id_opt {
                     if wpnprot.protect.0.get(&hit_id).copied().unwrap_or(0.0) <= 0.0 {
                         if let Some(hit) = players.states.get_mut(&hit_id) {
-                            if hit.alive { let dmg = 35u16; hit.hp = hit.hp.saturating_sub(dmg); let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id }); let bytes = bincode::serialize(&ev).unwrap(); for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } if hit.hp == 0 { hit.alive = false; let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id }); let bytes = bincode::serialize(&ev).unwrap(); for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } respawns.0.insert(hit_id, 2.0); if players.states.contains_key(&id) { let e = scores.0.entry(id).or_insert((0,0)); e.0 = e.0.saturating_add(1); } } }
+                            if hit.alive {
+                                let dmg = 35u16; hit.hp = hit.hp.saturating_sub(dmg);
+                                let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id });
+                                if let Ok(bytes) = bincode::serialize(&ev) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+                                if hit.hp == 0 {
+                                    hit.alive = false;
+                                    let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id });
+                                    if let Ok(bytes) = bincode::serialize(&ev) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+                                    respawns.0.insert(hit_id, 2.0);
+                                    if players.states.contains_key(&id) { let e = scores.0.entry(id).or_insert((0,0)); e.0 = e.0.saturating_add(1); }
+                                }
+                            }
                         } else if let Some(hit) = bots.states.get_mut(&hit_id) {
-                            if hit.alive { let dmg = 35u16; hit.hp = hit.hp.saturating_sub(dmg); let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id }); let bytes = bincode::serialize(&ev).unwrap(); for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } if hit.hp == 0 { hit.alive = false; let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id }); let bytes = bincode::serialize(&ev).unwrap(); for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } bot_respawns.0.insert(hit_id, 2.0); } }
+                            if hit.alive {
+                                let dmg = 35u16; hit.hp = hit.hp.saturating_sub(dmg);
+                                let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id });
+                                if let Ok(bytes) = bincode::serialize(&ev) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+                                if hit.hp == 0 {
+                                    hit.alive = false;
+                                    let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id });
+                                    if let Ok(bytes) = bincode::serialize(&ev) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
+                                    bot_respawns.0.insert(hit_id, 2.0);
+                                }
+                            }
                         }
                     }
                 }
@@ -1297,13 +1320,11 @@ fn srv_shoot_and_respawn(
                         let dmg = 35u16;
                         hit.hp = hit.hp.saturating_sub(dmg);
                         let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id });
-                        let bytes = bincode::serialize(&ev).unwrap();
-                        for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                        if let Ok(bytes) = bincode::serialize(&ev) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
                         if hit.hp == 0 {
                             hit.alive = false;
                             let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id });
-                            let bytes = bincode::serialize(&ev).unwrap();
-                            for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                            if let Ok(bytes) = bincode::serialize(&ev) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
                             respawns.0.insert(hit_id, 2.0);
                             // update scores and broadcast（人間のみスコア集計）
                             if players.states.contains_key(&id) { let e = scores.0.entry(id).or_insert((0,0)); e.0 = e.0.saturating_add(1); }
@@ -1327,13 +1348,11 @@ fn srv_shoot_and_respawn(
                         let dmg = 35u16;
                         hit.hp = hit.hp.saturating_sub(dmg);
                         let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hit.hp, by: id });
-                        let bytes = bincode::serialize(&ev).unwrap();
-                        for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                        if let Ok(bytes) = bincode::serialize(&ev) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
                         if hit.hp == 0 {
                             hit.alive = false;
                             let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: id });
-                            let bytes = bincode::serialize(&ev).unwrap();
-                            for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+                            if let Ok(bytes) = bincode::serialize(&ev) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
                             bot_respawns.0.insert(hit_id, 2.0);
                         }
                     }
@@ -1364,8 +1383,9 @@ fn srv_shoot_and_respawn(
             // リスポーン保護
             wpnprot.protect.0.insert(pid, PROTECT_SEC);
             let ev = ServerMessage::Event(EventMsg::Spawn { id: pid, pos: [p.pos.x, p.pos.y, p.pos.z], kind: ActorKind::Human });
-            let bytes = bincode::serialize(&ev).unwrap();
-            for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            if let Ok(bytes) = bincode::serialize(&ev) {
+                for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
         }
         // reset weapon
         let w = wpnprot.weapons.0.entry(pid).or_insert(WeaponStatus::default());
@@ -1425,8 +1445,9 @@ fn sync_players_with_connections(
             ents.0.insert(id, ent);
             info!("server: sync add player {} (total={})", id, players.states.len());
             let ev = ServerMessage::Event(EventMsg::Spawn { id, pos: [spawn.x, spawn.y, spawn.z], kind: ActorKind::Human });
-            let bytes = bincode::serialize(&ev).unwrap();
-            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            if let Ok(bytes) = bincode::serialize(&ev) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
             scores.0.entry(id).or_insert((0,0));
             // init weapon and notify
             let w = WeaponStatus { ammo: MAG_SIZE, cooldown: 0.0, reload: 0.0 };
@@ -1449,8 +1470,9 @@ fn sync_players_with_connections(
             if let Some(e) = ents.0.remove(&id) { commands.entity(e).despawn_recursive(); }
             info!("server: sync remove player {} (total={})", id, players.states.len());
             let ev = ServerMessage::Event(EventMsg::Despawn { id });
-            let bytes = bincode::serialize(&ev).unwrap();
-            for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            if let Ok(bytes) = bincode::serialize(&ev) {
+                for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); }
+            }
             scores.0.remove(&id);
         }
     }
@@ -1621,9 +1643,10 @@ fn broadcast_snapshots(
     let mut acks: Vec<(u64, u32)> = Vec::new();
     for (id, inp) in last.0.iter() { acks.push((*id, inp.seq)); }
     let snap = SnapshotMsg { tick: 0, players: players_vec, acks };
-    let bytes = bincode::serialize(&ServerMessage::Snapshot(snap)).unwrap();
-    for client_id in server.clients_id() {
-        let _ = server.send_message(client_id, CH_SNAPSHOT, bytes.clone());
+    if let Ok(bytes) = bincode::serialize(&ServerMessage::Snapshot(snap)) {
+        for client_id in server.clients_id() {
+            let _ = server.send_message(client_id, CH_SNAPSHOT, bytes.clone());
+        }
     }
 }
 
