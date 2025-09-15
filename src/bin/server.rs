@@ -1089,8 +1089,13 @@ fn bot_ai_shoot_and_respawn(
                         let ev = ServerMessage::Event(EventMsg::Hit { target_id: hit_id, new_hp: hitm.hp, by: *id });
                         if let Ok(bytes) = bincode::serialize(&ev) { for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
                         if hitm.hp == 0 {
-                            let mut_dead = players.states.get_mut(&hit_id).unwrap();
-                            mut_dead.alive = false;
+                            // プレイヤーが同フレーム中に離脱/除去されている場合に備えて防御
+                            if let Some(mut_dead) = players.states.get_mut(&hit_id) {
+                                mut_dead.alive = false;
+                            } else {
+                                // 既に消えているなら以降の処理はスキップ
+                                continue;
+                            }
                             let ev = ServerMessage::Event(EventMsg::Death { target_id: hit_id, by: *id });
                             if let Ok(bytes) = bincode::serialize(&ev) { for cid in server.clients_id() { let _ = server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
                             respawns_players.0.insert(hit_id, 2.0);
