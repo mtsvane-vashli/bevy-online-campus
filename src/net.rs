@@ -32,6 +32,8 @@ pub struct PlayerStateMsg {
     pub yaw: f32,
     pub alive: bool,
     pub hp: u16,
+    pub vy: f32,
+    pub grounded: bool,
     pub kind: ActorKind,
 }
 

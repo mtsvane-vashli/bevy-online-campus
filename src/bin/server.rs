@@ -11,6 +11,7 @@ use bevy_rapier3d::prelude::*;
 use bevy_renet::renet::{ClientId, RenetServer};
 use bevy_renet::transport::NetcodeServerPlugin;
 use bevy_renet::RenetServerPlugin;
+use std::collections::VecDeque;
 
 #[path = "../net.rs"]
 mod net;
@@ -81,6 +82,8 @@ struct ShootRes<'w> {
     spawns: Res<'w, SpawnPoints>,
     fires: ResMut<'w, PendingFires>,
     wpnprot: WpnProt<'w>,
+    sim: Res<'w, SimTime>,
+    hist: Res<'w, PosHistory>,
 }
 
 #[derive(Resource, Default)]
@@ -185,6 +188,12 @@ const BOT_AIRBORNE_SPREAD_MUL: f32 = 1.5; // 空中ターゲット拡散倍率
 const SPAWN_JITTER_RADIUS: f32 = 6.0; // スポーン分散半径
 const PROTECT_SEC: f32 = 2.0; // リスポーン保護（無敵・発砲不可）
 
+// --- Lag compensation params ---
+const LAG_COMP_SEC: f32 = 0.10; // 100ms 固定巻き戻し
+const HIST_MAX_SEC: f32 = 1.5; // 履歴保持時間
+const HIT_HEIGHT_HALF: f32 = 0.6; // カプセル半高さ（Collider::capsule_y と一致）
+const HIT_RADIUS: f32 = 0.3; // カプセル半径
+
 // ===== Scaffold params (server authority; クライアントと合わせる) =====
 const SCAFFOLD_SIZE: Vec3 = Vec3::new(2.0, 0.5, 2.0);
 const SCAFFOLD_RANGE: f32 = 5.0;
@@ -210,6 +219,12 @@ struct PendingScaffold(Vec<(u64, Vec3)>); // (owner, final_pos)
 
 #[derive(Resource, Default)]
 struct PendingFires(Vec<(u64, Vec3, Vec3)>); // (shooter_id, origin, dir)
+
+#[derive(Resource, Default)]
+struct PosHistory(HashMap<u64, VecDeque<(f32, Vec3)>>);
+
+#[derive(Resource, Default)]
+struct SimTime(f32);
 
 fn main() {
     App::new()
@@ -255,6 +270,8 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(SnapshotTimer(Timer::from_seconds(1.0/30.0, TimerMode::Repeating)))
         .insert_resource(ServerLogTimer(Timer::from_seconds(1.0, TimerMode::Repeating)))
+        .insert_resource(PosHistory::default())
+        .insert_resource(SimTime::default())
         .insert_resource(Scaffolds::default())
         .insert_resource(ScaffoldEntities::default())
         .insert_resource(NextScaffoldId(2_000_000_000_000))
@@ -270,6 +287,7 @@ fn main() {
         .add_systems(FixedUpdate, bot_kcc_move_fsm.before(PhysicsSet::StepSimulation))
         .add_systems(FixedUpdate, srv_kcc_post.after(PhysicsSet::Writeback))
         .add_systems(FixedUpdate, bot_kcc_post.after(PhysicsSet::Writeback))
+        .add_systems(FixedUpdate, update_position_history)
         .add_systems(FixedUpdate, srv_shoot_and_respawn)
         .add_systems(FixedUpdate, process_scaffold_requests)
         .add_systems(FixedUpdate, scaffold_tick_and_cleanup_srv)
@@ -736,14 +754,31 @@ fn process_scaffold_requests(
         let Some(&_p_ent) = ents.0.get(&owner) else { pending.0.push((owner, place_in)); continue };
         let mut place = place_in;
 
-        // --- 交差/近接チェック（所有者と重ならないように）
+        // --- 交差/近接チェック（所有者と重ならないように最小押し出し）
         if let Some(pst) = players.states.get(&owner) {
             let ply = pst.pos;
             let player_radius = 0.3f32; // Collider::capsule_y(0.6, 0.3) に合わせる
             let half_extent = (SCAFFOLD_SIZE.x.max(SCAFFOLD_SIZE.z)) * 0.5;
             let margin = 0.06f32;
             let min_dist = player_radius + half_extent + margin;
-            // クライアント単体ロジックと一致させるため、ここでは追加スライドを行わない
+            let dx = place.x - ply.x;
+            let dz = place.z - ply.z;
+            let d2 = dx*dx + dz*dz;
+            let min_d2 = min_dist * min_dist;
+            if d2 < min_d2 {
+                let mut nx = dx;
+                let mut nz = dz;
+                let len = (nx*nx + nz*nz).sqrt();
+                if len < 1e-5 {
+                    // 向きが不定なら +X 方向に押し出す
+                    nx = 1.0; nz = 0.0;
+                } else {
+                    nx /= len; nz /= len;
+                }
+                let push = min_dist - len.min(min_dist);
+                place.x = ply.x + nx * (len + push);
+                place.z = ply.z + nz * (len + push);
+            }
         }
 
         // per-owner limit (FIFO)
@@ -852,6 +887,73 @@ fn bot_kcc_post(
             }
         }
     }
+}
+
+// --- Position history sampling for lag compensation ---
+fn update_position_history(
+    time_fixed: Res<Time<Fixed>>,
+    mut sim: ResMut<SimTime>,
+    players: Res<Players>,
+    bots: Res<Bots>,
+    mut hist: ResMut<PosHistory>,
+){
+    let dt = time_fixed.delta_seconds();
+    sim.0 += dt;
+    let now = sim.0;
+    // humans
+    for (id, s) in players.states.iter() {
+        let dq = hist.0.entry(*id).or_default();
+        dq.push_back((now, s.pos));
+        while let Some((t, _)) = dq.front().copied() { if now - t > HIST_MAX_SEC { dq.pop_front(); } else { break; } }
+    }
+    // bots
+    for (id, s) in bots.states.iter() {
+        let dq = hist.0.entry(*id).or_default();
+        dq.push_back((now, s.pos));
+        while let Some((t, _)) = dq.front().copied() { if now - t > HIST_MAX_SEC { dq.pop_front(); } else { break; } }
+    }
+}
+
+fn rewind_pos(hist: &PosHistory, id: u64, t_target: f32) -> Option<Vec3> {
+    let dq = hist.0.get(&id)?;
+    if dq.is_empty() { return None; }
+    // if outside range, clamp to ends
+    if t_target <= dq.front()?.0 { return Some(dq.front()?.1); }
+    if t_target >= dq.back()?.0 { return Some(dq.back()?.1); }
+    // find segment bracketing t_target (linear search; deques are short)
+    let mut prev = dq.front().copied()?;
+    for &(t, p) in dq.iter() {
+        if t >= t_target {
+            let (t0, p0) = prev;
+            let (t1, p1) = (t, p);
+            let alpha = ((t_target - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            return Some(p0.lerp(p1, alpha));
+        }
+        prev = (t, p);
+    }
+    Some(dq.back()?.1)
+}
+
+fn ray_cylinder_hit(origin: Vec3, dir: Vec3, range: f32, center: Vec3, half_h: f32, radius: f32) -> Option<f32> {
+    let dx = dir.x; let dz = dir.z; let dy = dir.y;
+    let a = dx*dx + dz*dz;
+    if a < 1e-6 { return None; }
+    let ox = origin.x - center.x; let oz = origin.z - center.z; let oy = origin.y;
+    let b = 2.0 * (dx*ox + dz*oz);
+    let c = ox*ox + oz*oz - radius*radius;
+    let disc = b*b - 4.0*a*c;
+    if disc < 0.0 { return None; }
+    let sqrt_disc = disc.sqrt();
+    let mut t0 = (-b - sqrt_disc) / (2.0 * a);
+    let mut t1 = (-b + sqrt_disc) / (2.0 * a);
+    if t0 > t1 { std::mem::swap(&mut t0, &mut t1); }
+    let mut pick: Option<f32> = None;
+    for &t in [t0, t1].iter() {
+        if t < 0.0 || t > range { continue; }
+        let y = oy + dy * t;
+        if y >= center.y - half_h - 0.05 && y <= center.y + half_h + 0.05 { pick = Some(t); break; }
+    }
+    pick
 }
 
 fn bot_ai_shoot_and_respawn(
@@ -1047,12 +1149,22 @@ fn srv_shoot_and_respawn(
                 }
                 w.ammo = w.ammo.saturating_sub(1); w.cooldown = FIRE_COOLDOWN;
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Ammo { id, ammo: w.ammo, reloading: false })) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
-                let mut filter = QueryFilter::default(); if let Some(&self_ent) = ents.0.get(&id) { filter = filter.exclude_collider(self_ent); }
+                // Lag-compensated hit decision (rewind 100ms), with current-world occlusion check
+                let t_query = s.sim.0 - LAG_COMP_SEC;
+                let range = 100.0f32;
+                let mut best: Option<(u64, f32)> = None;
+                for (tid, st) in players.states.iter() { if *tid != id && st.alive { if let Some(cpos) = rewind_pos(&s.hist, *tid, t_query) { if let Some(t)=ray_cylinder_hit(origin, forward, range, cpos, HIT_HEIGHT_HALF, HIT_RADIUS) { if best.map_or(true, |(_,bt)| t<bt) { best=Some((*tid,t)); } } } } }
+                for (tid, st) in bots.states.iter() { if *tid != id && st.alive { if let Some(cpos) = rewind_pos(&s.hist, *tid, t_query) { if let Some(t)=ray_cylinder_hit(origin, forward, range, cpos, HIT_HEIGHT_HALF, HIT_RADIUS) { if best.map_or(true, |(_,bt)| t<bt) { best=Some((*tid,t)); } } } } }
                 let mut hit_point: Option<[f32;3]> = None; let mut hit_id_opt: Option<u64> = None;
-                if let Some((hit_ent, toi)) = rapier.cast_ray(origin, forward, 100.0, true, filter) {
-                    hit_point = Some([origin.x + forward.x * toi, origin.y + forward.y * toi, origin.z + forward.z * toi]);
-                    if let Some(pid) = ents.0.iter().find_map(|(pid, &e)| if e==hit_ent { Some(*pid) } else { None }) { hit_id_opt = Some(pid); }
-                    if let Some(bid) = bot_ents.0.iter().find_map(|(bid, &e)| if e==hit_ent { Some(*bid) } else { None }) { hit_id_opt = Some(bid); }
+                if let Some((hid, t_hit)) = best {
+                    let mut filter = QueryFilter::default(); if let Some(&self_ent) = ents.0.get(&id) { filter = filter.exclude_collider(self_ent); }
+                    if let Some((hit_ent, _)) = rapier.cast_ray(origin, forward, t_hit, true, filter) {
+                        let target_ent_h = ents.0.get(&hid).copied(); let target_ent_b = bot_ents.0.get(&hid).copied();
+                        if Some(hit_ent) == target_ent_h || Some(hit_ent) == target_ent_b {
+                            hit_id_opt = Some(hid);
+                            hit_point = Some([origin.x + forward.x * t_hit, origin.y + forward.y * t_hit, origin.z + forward.z * t_hit]);
+                        }
+                    }
                 }
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire { id, origin: [origin.x, origin.y, origin.z], dir: [forward.x, forward.y, forward.z], hit: hit_point })) { for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); } }
                 if let Some(hit_id) = hit_id_opt {
@@ -1094,12 +1206,12 @@ fn srv_shoot_and_respawn(
             let forward = yaw_rot * pitch_rot * Vec3::NEG_Z;
             let origin = pos + Vec3::new(0.0, 0.7, 0.0);
             let range = 100.0f32;
-            // Send Fire event (with first hit point if any)
-            let mut filter_fire = QueryFilter::default();
-            if let Some(&self_ent) = ents.0.get(&id) { filter_fire = filter_fire.exclude_collider(self_ent); }
-            let hit_opt = if let Some((_hit_ent, toi)) = rapier.cast_ray(origin, forward, range, true, filter_fire) {
-                Some([origin.x + forward.x * toi, origin.y + forward.y * toi, origin.z + forward.z * toi])
-            } else { None };
+            // Lag-compensated Fire event point (rewind 100ms)
+            let t_query = s.sim.0 - LAG_COMP_SEC;
+            let mut best_t: Option<f32> = None;
+            for (tid, st) in players.states.iter() { if *tid != id && st.alive { if let Some(cpos)=rewind_pos(&s.hist, *tid, t_query) { if let Some(t)=ray_cylinder_hit(origin, forward, range, cpos, HIT_HEIGHT_HALF, HIT_RADIUS) { if best_t.map_or(true, |bt| t<bt) { best_t=Some(t); } } } } }
+            for (tid, st) in bots.states.iter() { if *tid != id && st.alive { if let Some(cpos)=rewind_pos(&s.hist, *tid, t_query) { if let Some(t)=ray_cylinder_hit(origin, forward, range, cpos, HIT_HEIGHT_HALF, HIT_RADIUS) { if best_t.map_or(true, |bt| t<bt) { best_t=Some(t); } } } } }
+            let hit_opt = best_t.map(|t| [origin.x + forward.x * t, origin.y + forward.y * t, origin.z + forward.z * t]);
             if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire { id, origin: [origin.x, origin.y, origin.z], dir: [forward.x, forward.y, forward.z], hit: hit_opt })) {
                 for cid in s.server.clients_id() { let _ = s.server.send_message(cid, CH_RELIABLE, bytes.clone()); }
             }
@@ -1428,9 +1540,27 @@ fn broadcast_snapshots(
     let mut players_vec: Vec<PlayerStateMsg> = players
         .states
         .iter()
-        .map(|(id, s)| PlayerStateMsg { id: *id, pos: [s.pos.x, s.pos.y, s.pos.z], yaw: s.yaw, alive: s.alive, hp: s.hp, kind: ActorKind::Human })
+        .map(|(id, s)| PlayerStateMsg {
+            id: *id,
+            pos: [s.pos.x, s.pos.y, s.pos.z],
+            yaw: s.yaw,
+            alive: s.alive,
+            hp: s.hp,
+            vy: s.vy,
+            grounded: s.grounded,
+            kind: ActorKind::Human,
+        })
         .collect();
-    players_vec.extend(bots.states.iter().map(|(id, s)| PlayerStateMsg { id: *id, pos: [s.pos.x, s.pos.y, s.pos.z], yaw: s.yaw, alive: s.alive, hp: s.hp, kind: ActorKind::Bot }));
+    players_vec.extend(bots.states.iter().map(|(id, s)| PlayerStateMsg {
+        id: *id,
+        pos: [s.pos.x, s.pos.y, s.pos.z],
+        yaw: s.yaw,
+        alive: s.alive,
+        hp: s.hp,
+        vy: s.vy,
+        grounded: s.grounded,
+        kind: ActorKind::Bot,
+    }));
     if matches!(std::env::var("NET_SNAPSHOT_LOG").ok(), Some(_)) {
         info!("server: snapshot actors={}", players_vec.len());
     }
