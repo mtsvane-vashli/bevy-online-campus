@@ -194,6 +194,11 @@ const HIST_MAX_SEC: f32 = 1.5; // 履歴保持時間
 const HIT_HEIGHT_HALF: f32 = 0.6; // カプセル半高さ（Collider::capsule_y と一致）
 const HIT_RADIUS: f32 = 0.3; // カプセル半径
 
+// --- Jump quality (server-authoritative) ---
+const JUMP_BUFFER_SEC: f32 = 0.12; // 押下先行受付
+const COYOTE_SEC: f32 = 0.10;      // 足場離脱後の猶予
+const JUMP_COOLDOWN_SEC: f32 = 0.15; // 連打誤爆防止
+
 // ===== Scaffold params (server authority; クライアントと合わせる) =====
 const SCAFFOLD_SIZE: Vec3 = Vec3::new(2.0, 0.5, 2.0);
 const SCAFFOLD_RANGE: f32 = 5.0;
@@ -225,6 +230,15 @@ struct PosHistory(HashMap<u64, VecDeque<(f32, Vec3)>>);
 
 #[derive(Resource, Default)]
 struct SimTime(f32);
+
+#[derive(Resource, Default)]
+struct JumpBuffers(HashMap<u64, f32>);
+
+#[derive(Resource, Default)]
+struct CoyoteTimers(HashMap<u64, f32>);
+
+#[derive(Resource, Default)]
+struct JumpCooldowns(HashMap<u64, f32>);
 
 fn main() {
     App::new()
@@ -272,6 +286,9 @@ fn main() {
         .insert_resource(ServerLogTimer(Timer::from_seconds(1.0, TimerMode::Repeating)))
         .insert_resource(PosHistory::default())
         .insert_resource(SimTime::default())
+        .insert_resource(JumpBuffers::default())
+        .insert_resource(CoyoteTimers::default())
+        .insert_resource(JumpCooldowns::default())
         .insert_resource(Scaffolds::default())
         .insert_resource(ScaffoldEntities::default())
         .insert_resource(NextScaffoldId(2_000_000_000_000))
@@ -428,14 +445,16 @@ fn recv_inputs(
     mut last: ResMut<LastInputs>,
     mut pending: ResMut<PendingScaffold>,
     mut fires: ResMut<PendingFires>,
+    mut jbuf: ResMut<JumpBuffers>,
 ) {
     for client_id in server.clients_id().iter().copied().collect::<Vec<ClientId>>() {
         while let Some(raw) = server.receive_message(client_id, CH_INPUT) {
             if let Ok(msg) = bincode::deserialize::<ClientMessage>(&raw) {
                 match msg {
                     ClientMessage::Input(frame) => {
-                last.0.insert(client_id.raw(), frame);
-                }
+                        if frame.jump { jbuf.0.insert(client_id.raw(), JUMP_BUFFER_SEC); }
+                        last.0.insert(client_id.raw(), frame);
+                    }
                     ClientMessage::PlaceScaffold { pos } => {
                         let p = Vec3::new(pos[0], pos[1], pos[2]);
                         pending.0.push((client_id.raw(), p));
@@ -458,6 +477,7 @@ fn recv_inputs(
                 let d = Vec3::new(dir[0], dir[1], dir[2]);
                 fires.0.push((client_id.raw(), o, d));
             } else if let Ok(ClientMessage::Input(frame)) = bincode::deserialize::<ClientMessage>(&raw) {
+                if frame.jump { jbuf.0.insert(client_id.raw(), JUMP_BUFFER_SEC); }
                 last.0.insert(client_id.raw(), frame);
             }
         }
@@ -473,6 +493,9 @@ fn srv_kcc_move(
     mut q: Query<&mut KinematicCharacterController>,
     ready: Res<MapReady>,
     mut jumps: ResMut<JumpCounts>,
+    mut jbuf: ResMut<JumpBuffers>,
+    mut coyote: ResMut<CoyoteTimers>,
+    mut jcool: ResMut<JumpCooldowns>,
 ) {
     if !ready.0 { return; }
     let dt = time_fixed.delta_seconds();
@@ -490,15 +513,33 @@ fn srv_kcc_move(
             let mut speed = 6.0;
             if inp.run { speed *= 1.7; }
             if inp.ads { speed *= ADS_SPEED_MUL; }
+            // timers update
+            let buf_t = jbuf.0.entry(*id).or_insert(0.0); if *buf_t > 0.0 { *buf_t = (*buf_t - dt).max(0.0); }
+            let coy_t = coyote.0.entry(*id).or_insert(0.0);
+            if state.grounded { *coy_t = COYOTE_SEC; } else if *coy_t > 0.0 { *coy_t = (*coy_t - dt).max(0.0); }
+            let cd_t = jcool.0.entry(*id).or_insert(0.0); if *cd_t > 0.0 { *cd_t = (*cd_t - dt).max(0.0); }
+
             let mut vy = state.vy - 9.81 * dt;
-            if inp.jump {
-                let used = jumps.0.entry(*id).or_insert(0);
-                if state.grounded || *used < 1 {
+            let used = jumps.0.entry(*id).or_insert(0);
+            let mut jumped_now = false;
+            if *buf_t > 0.0 && *cd_t <= 0.0 {
+                if state.grounded || *coy_t > 0.0 {
                     vy = 5.2;
-                    if !state.grounded { *used = used.saturating_add(1); }
+                    jumped_now = true;
+                    *buf_t = 0.0;
+                } else if *used < 1 { // air jump
+                    vy = 5.2;
+                    *used = used.saturating_add(1);
+                    jumped_now = true;
+                    *buf_t = 0.0;
                 }
             }
             let motion = horiz * speed * dt + Vec3::Y * vy * dt;
+            if jumped_now {
+                // disable snap this frame to avoid glue-to-ground
+                kcc.snap_to_ground = None;
+                *cd_t = JUMP_COOLDOWN_SEC;
+            }
             kcc.translation = Some(motion);
             state.vy = vy;
             state.yaw = inp.yaw;
@@ -850,6 +891,7 @@ fn srv_kcc_post(
     mut players: ResMut<Players>,
     ents: Res<ServerEntities>,
     q: Query<(&GlobalTransform, Option<&KinematicCharacterControllerOutput>)>,
+    mut qk: Query<&mut KinematicCharacterController>,
     mut jumps: ResMut<JumpCounts>,
 ) {
     for (id, state) in players.states.iter_mut() {
@@ -863,6 +905,10 @@ fn srv_kcc_post(
                     if let Some(j) = jumps.0.get_mut(id) { *j = 0; }
                 }
             }
+            // re-enable snap_to_ground after physics step (if it was disabled for jump)
+            if let Ok(mut kcc) = qk.get_mut(entity) {
+                if kcc.snap_to_ground.is_none() { kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25)); }
+            }
         }
     }
 }
@@ -871,6 +917,7 @@ fn bot_kcc_post(
     mut bots: ResMut<Bots>,
     bot_ents: Res<BotEntities>,
     q: Query<(&GlobalTransform, Option<&KinematicCharacterControllerOutput>)>,
+    mut qk: Query<&mut KinematicCharacterController>,
     mut safe: ResMut<BotSafePos>,
 ) {
     for (id, state) in bots.states.iter_mut() {
@@ -884,6 +931,9 @@ fn bot_kcc_post(
                     // 安全位置の更新
                     safe.0.insert(*id, state.pos);
                 }
+            }
+            if let Ok(mut kcc) = qk.get_mut(entity) {
+                if kcc.snap_to_ground.is_none() { kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25)); }
             }
         }
     }
