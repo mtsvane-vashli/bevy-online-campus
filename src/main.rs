@@ -257,11 +257,17 @@ fn setup_player(mut commands: Commands, mut windows: Query<&mut Window>) {
             },
         ))
         // キャラクターコントローラと当たり判定（カプセル）
-        .insert((
-            Collider::capsule_y(0.6, 0.3), // 全高 ~1.8m（0.6*2 + 0.3*2）
-            KinematicCharacterController::default(),
-            Controller::default(),
-        ))
+        .insert({
+            let mut kcc = KinematicCharacterController::default();
+            // サーバと同一のオートステップ/スナップに合わせる
+            kcc.autostep = Some(CharacterAutostep { max_height: CharacterLength::Absolute(0.5), min_width: CharacterLength::Absolute(0.3), include_dynamic_bodies: true });
+            kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
+            (
+                Collider::capsule_y(0.6, 0.3),
+                kcc,
+                Controller::default(),
+            )
+        })
         .id();
 
     // カメラはプレイヤーの子: pitch はカメラにのみ反映
@@ -592,6 +598,8 @@ fn kcc_move_system(
             ctrl.vy = JUMP_SPEED;
             if !ctrl.on_ground { ctrl.jumps = ctrl.jumps.saturating_add(1); }
             ctrl.on_ground = false;
+            // サーバと一致: このフレームは地面スナップを無効化して初速を確実に反映
+            kcc.snap_to_ground = None;
         }
     }
 
@@ -601,6 +609,7 @@ fn kcc_move_system(
 
 fn kcc_post_step_system(
     mut q: Query<(&mut Controller, Option<&KinematicCharacterControllerOutput>), With<Player>>,
+    mut qk: Query<&mut KinematicCharacterController, With<Player>>,
 ) {
     let (mut ctrl, output) = if let Ok(v) = q.get_single_mut() { v } else { return };
     if let Some(out) = output {
@@ -608,6 +617,12 @@ fn kcc_post_step_system(
         if out.grounded && ctrl.vy <= 0.0 {
             ctrl.vy = 0.0;
             ctrl.jumps = 0; // 地上に戻ったら空中ジャンプ回数をリセット
+        }
+    }
+    // ジャンプフレームで無効化した snap_to_ground を復帰
+    if let Ok(mut kcc) = qk.get_single_mut() {
+        if kcc.snap_to_ground.is_none() {
+            kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
         }
     }
 }
