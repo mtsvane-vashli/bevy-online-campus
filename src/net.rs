@@ -16,7 +16,6 @@ pub const CH_RELIABLE: u8 = 2; // reliable, ordered (events)
 pub struct InputFrame {
     pub seq: u32,
     pub mv: [f32; 2], // x,z on local plane
-    pub run: bool,
     pub jump: bool,
     pub fire: bool,
     pub ads: bool,
@@ -87,7 +86,6 @@ pub fn connection_config() -> ConnectionConfig { ConnectionConfig::default() }
 // 共有定数（クライアント/サーバ双方で使用するゲームパラメータ）
 pub mod shared {
     pub const MOVE_SPEED: f32 = 6.0;
-    pub const RUN_MULTIPLIER: f32 = 1.7;
     pub const ADS_SPEED_MUL: f32 = 0.6;
     pub const GRAVITY: f32 = 9.81;
     pub const JUMP_SPEED: f32 = 5.2;

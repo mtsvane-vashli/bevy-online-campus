@@ -22,7 +22,6 @@ use net::*;
 const MAP_SCENE_PATH: &str = "maps/map.glb#Scene0"; // assets 配下に maps/map.glb を置いてください
 const PLAYER_START: Vec3 = Vec3::new(0.0, 10.0, 5.0);
 const MOVE_SPEED: f32 = 6.0; // m/s
-const RUN_MULTIPLIER: f32 = 1.7;
 const MOUSE_SENSITIVITY: f32 = 0.0018; // rad/pixel
 const HIP_FOV: f32 = 90.0_f32.to_radians();
 const ADS_FOV: f32 = 65.0_f32.to_radians();
@@ -583,11 +582,8 @@ fn kcc_move_system(
         horiz = (yaw_rot * input).normalize();
     }
 
-    // スピード調整
+    // スピード調整（スプリント削除）
     let mut speed = MOVE_SPEED;
-    if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
-        speed *= RUN_MULTIPLIER;
-    }
     if buttons.pressed(MouseButton::Right) { speed *= ADS_SPEED_MUL; }
 
     // 重力・ジャンプ
@@ -1003,7 +999,7 @@ fn net_send_input(
     if keys.pressed(KeyCode::KeyS) { mv[1] += 1.0; }
     if keys.pressed(KeyCode::KeyA) { mv[0] -= 1.0; }
     if keys.pressed(KeyCode::KeyD) { mv[0] += 1.0; }
-    let run = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    // スプリント削除: run フラグ無し
     let jump = keys.just_pressed(KeyCode::Space);
     // 連射: 押しっぱなしで true を送り続ける
     let fire = buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::KeyF);
@@ -1011,7 +1007,7 @@ fn net_send_input(
     let ads = buttons.pressed(MouseButton::Right);
     seq.0 = seq.0.wrapping_add(1);
     let dt = time.delta_seconds();
-    let frame = InputFrame { seq: seq.0, mv, run, jump, fire, ads, yaw: cam.yaw, pitch: cam.pitch, dt };
+    let frame = InputFrame { seq: seq.0, mv, jump, fire, ads, yaw: cam.yaw, pitch: cam.pitch, dt };
     buf.0.push_back(frame.clone());
     if let Some(ack) = last_conf.0 {
         while let Some(front) = buf.0.front() { if front.seq <= ack { buf.0.pop_front(); } else { break; } }
@@ -1293,7 +1289,6 @@ fn reconcile_self(
                     horiz = (yaw_rot * input).normalize();
                 }
             let mut speed = MOVE_SPEED;
-            if f.run { speed *= RUN_MULTIPLIER; }
             if f.ads { speed *= ADS_SPEED_MUL; }
             if f.jump && (used_jumps == 0) { vy = JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
             vy -= GRAVITY * f.dt;
@@ -1353,7 +1348,6 @@ fn replay_unconfirmed_inputs(
             horiz = (yaw_rot * input).normalize();
         }
         let mut speed = MOVE_SPEED;
-        if f.run { speed *= RUN_MULTIPLIER; }
         // jump
         if f.jump && (used_jumps == 0) { vy = JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
         // integrate

@@ -511,7 +511,6 @@ fn srv_kcc_move(
                 horiz = (yaw_rot * input).normalize();
             }
             let mut speed = 6.0;
-            if inp.run { speed *= 1.7; }
             if inp.ads { speed *= ADS_SPEED_MUL; }
             // timers update
             let buf_t = jbuf.0.entry(*id).or_insert(0.0); if *buf_t > 0.0 { *buf_t = (*buf_t - dt).max(0.0); }
