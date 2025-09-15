@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"]
+﻿// #![windows_subsystem = "windows"]
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
@@ -34,8 +34,8 @@ const GRAVITY: f32 = 9.81; // m/s^2
 const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
 const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
 // Position reconciliation thresholds (light server convergence)
-const POS_DEADBAND: f32 = 0.05; // meters: ignore tiny diffs (stop jitter)
-const POS_SNAP: f32 = 0.8; // meters: snap when far out-of-bounds
+const POS_DEADBAND: f32 = 0.08; // meters: small jitterを無視して安定化
+const POS_SNAP: f32 = 1.2; // meters: 乖離が大きい時のみスナップ
 
 #[inline]
 fn wrap_pi(a: f32) -> f32 {
@@ -195,6 +195,7 @@ fn main() {
         .add_systems(Update, keyboard_look_system)
         .add_systems(Update, kcc_move_system)
         .add_systems(Update, kcc_post_step_system)
+        .add_systems(Update, client_airborne_snap_control.after(kcc_post_step_system))
         .add_systems(Update, shoot_system)
         .add_systems(Update, bullet_move_and_despawn)
         .add_systems(Update, add_mesh_colliders_for_map)
@@ -623,6 +624,23 @@ fn kcc_post_step_system(
     if let Ok(mut kcc) = qk.get_single_mut() {
         if kcc.snap_to_ground.is_none() {
             kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
+        }
+    }
+}
+
+// 空中時は地面スナップを無効化して「地上にワープ」する補正を防ぐ。
+fn client_airborne_snap_control(
+    mut qk: Query<&mut KinematicCharacterController, With<Player>>,
+    q: Query<&Controller, With<Player>>,
+){
+    let ctrl = if let Ok(c) = q.get_single() { c } else { return };
+    if let Ok(mut kcc) = qk.get_single_mut() {
+        if ctrl.on_ground {
+            if kcc.snap_to_ground.is_none() {
+                kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
+            }
+        } else {
+            kcc.snap_to_ground = None;
         }
     }
 }
@@ -1141,7 +1159,7 @@ fn net_recv_events(
                     // キルログ追加
                     let killer = if by == local.id { "You".to_string() } else { format!("{}", by) };
                     let victim = if target_id == local.id { "You".to_string() } else { format!("{}", target_id) };
-                    let line = format!("{} → {}", killer, victim);
+                    let line = format!("{} -> {}", killer, victim);
                     if let Ok(root) = log_root_q.get_single() {
                         commands.entity(root).with_children(|p| {
                             p.spawn((
