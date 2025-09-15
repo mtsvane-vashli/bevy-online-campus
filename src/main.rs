@@ -27,8 +27,6 @@ const HIP_FOV: f32 = 90.0_f32.to_radians();
 const ADS_FOV: f32 = 65.0_f32.to_radians();
 const ADS_SENS_MUL: f32 = 0.6; // ADS中のマウス感度倍率
 const ADS_SPEED_MUL: f32 = 0.6; // ADS中の移動速度倍率
-const BULLET_SPEED: f32 = 40.0; // m/s
-const BULLET_LIFETIME: f32 = 2.0; // sec
 const GRAVITY: f32 = 9.81; // m/s^2
 const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
 const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
@@ -103,12 +101,7 @@ struct PlayerCamera {
     pitch: f32,
 }
 
-#[derive(Component)]
-struct Bullet {
-    dir: Vec3,
-    speed: f32,
-    life: Timer,
-}
+// 見た目弾は廃止（サーバ権威のヒットスキャンに統一）
 
 #[derive(Resource, Default)]
 struct CursorLocked(pub bool);
@@ -195,8 +188,7 @@ fn main() {
         .add_systems(Update, kcc_move_system)
         .add_systems(Update, kcc_post_step_system)
         .add_systems(Update, client_airborne_snap_control.after(kcc_post_step_system))
-        .add_systems(Update, shoot_system)
-        .add_systems(Update, bullet_move_and_despawn)
+        // 見た目弾の生成/更新は削除
         .add_systems(Update, add_mesh_colliders_for_map)
         .add_systems(Update, net_log_connection)
         .add_systems(Update, net_send_input
@@ -641,6 +633,7 @@ fn client_airborne_snap_control(
     }
 }
 
+/*
 fn shoot_system(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -708,6 +701,7 @@ fn bullet_move_and_despawn(
     }
 }
 
+*/
 // ===== HUD Systems =====
 fn hud_update_hp(mut q: Query<&mut Text, With<UiHp>>, hp: Res<LocalHealth>) {
     if let Ok(mut t) = q.get_single_mut() {
@@ -744,7 +738,7 @@ fn add_mesh_colliders_for_map(
     mut commands: Commands,
     meshes: Res<Assets<Mesh>>,
     mut ready: ResMut<MapReady>,
-    q: Query<(Entity, &Handle<Mesh>), (Added<Handle<Mesh>>, Without<Collider>, Without<Bullet>, Without<Player>)>,
+    q: Query<(Entity, &Handle<Mesh>), (Added<Handle<Mesh>>, Without<Collider>, Without<Player>)>,
 ) {
     let mut any_inserted = false;
     for (e, h) in &q {
