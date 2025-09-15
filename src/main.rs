@@ -1289,15 +1289,19 @@ fn reconcile_self(
         // Snap when far out-of-bounds to recover quickly.
         // ただし Transform を直接書き換えず、KCC に追加移動として与え、衝突解決に任せる。
         if let Ok(mut kcc) = qk.get_single_mut() {
+            let grounded = self_auth.grounded.unwrap_or(false);
             if d >= POS_SNAP {
-                let corr = diff; // そのまま収束させる（KCCが壁を考慮）
+                // 空中ではY補正を入れない（落下中のがくつきを防止）
+                let mut corr = diff;
+                if !grounded { corr.y = 0.0; }
                 kcc.translation = Some(kcc.translation.unwrap_or(Vec3::ZERO) + corr);
                 return;
             }
             // Smooth correction within thresholds (collidable via KCC).
             let rate = 6.0; // per second (softer to reduce rubberband feel)
             let step = (rate * time.delta_seconds()).min(1.0);
-            let corr = diff * step;
+            let mut corr = diff * step;
+            if !grounded { corr.y = 0.0; }
             kcc.translation = Some(kcc.translation.unwrap_or(Vec3::ZERO) + corr);
         }
     }
