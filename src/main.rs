@@ -144,6 +144,13 @@ struct NetScaffold { sid: u64 }
 #[derive(Resource, Default)]
 struct NetScaffoldMap(std::collections::HashMap<u64, Entity>);
 
+// サーバ確定前のローカル可視用ゴースト足場
+#[derive(Component)]
+struct GhostScaffold;
+
+#[derive(Resource, Default)]
+struct LocalGhostScaffold(Option<Entity>);
+
 #[derive(SystemParam)]
 struct NetScaffoldAssets<'w, 's> {
     meshes: ResMut<'w, Assets<Mesh>>,
@@ -164,6 +171,7 @@ fn main() {
         .insert_resource(ActorPositions::default())
         .insert_resource(LocalScaffolds::default())
         .insert_resource(NetScaffoldMap::default())
+        .insert_resource(LocalGhostScaffold::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Bevy FPS".into(),
@@ -754,7 +762,7 @@ struct LocalNetInfo { id: u64 }
 struct InputSeq(u32);
 
 #[derive(Resource, Default)]
-struct AuthoritativeSelf { pos: Option<Vec3>, yaw: Option<f32> }
+struct AuthoritativeSelf { pos: Option<Vec3>, yaw: Option<f32>, vy: Option<f32>, grounded: Option<bool> }
 
 #[derive(Resource)]
 struct LocalHealth { hp: u16 }
@@ -795,6 +803,7 @@ fn scaffold_input_system(
     local_id: Res<LocalNetInfo>,
     mut owned: ResMut<LocalScaffolds>,
     mut client: ResMut<RenetClient>,
+    mut ghost: ResMut<LocalGhostScaffold>,
 ) {
     if !keys.just_pressed(KeyCode::KeyQ) { return; }
 
@@ -820,6 +829,23 @@ fn scaffold_input_system(
         if let Ok(bytes) = bincode::serialize(&ClientMessage::PlaceScaffold { pos: [place_pos.x, place_pos.y, place_pos.z] }) {
             let _ = client.send_message(CH_RELIABLE, bytes);
         }
+        // 視覚フィードバック用のゴースト足場（コライダー無し）を即時表示
+        // 既存のゴーストがあれば消す
+        if let Some(e) = ghost.0.take() { commands.entity(e).despawn_recursive(); }
+        let mesh = meshes.add(Cuboid::new(SCAFFOLD_SIZE.x, SCAFFOLD_SIZE.y, SCAFFOLD_SIZE.z));
+        let col = Color::srgba(0.2, 0.9, 1.0, 0.25);
+        let mat = materials.add(StandardMaterial {
+            base_color: col,
+            emissive: Color::srgb(0.2, 0.6, 0.9).into(),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        });
+        let ent = commands.spawn((
+            PbrBundle { mesh, material: mat, transform: Transform::from_translation(place_pos), ..default() },
+            GhostScaffold,
+        )).id();
+        ghost.0 = Some(ent);
         return;
     }
     let cam_g = if let Ok(v) = cam_q.get_single() { v } else { return };
@@ -996,6 +1022,8 @@ fn net_recv_snapshot(
                 if p.id == local.id {
                     self_auth.pos = Some(Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
                     self_auth.yaw = Some(p.yaw);
+                    self_auth.vy = Some(p.vy);
+                    self_auth.grounded = Some(p.grounded);
                     continue;
                 }
                 let pos = Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
@@ -1039,6 +1067,7 @@ fn net_recv_events(
     mut local_ammo: ResMut<LocalAmmo>,
     mut kinds: ResMut<ActorKindsMap>,
     mut player_q: Query<(&mut Transform, &mut Controller), With<Player>>,
+    mut ghost: ResMut<LocalGhostScaffold>,
 ) {
     while let Some(raw) = client.receive_message(CH_RELIABLE) {
         if let Ok(msg) = bincode::deserialize::<ServerMessage>(&raw) {
@@ -1147,7 +1176,7 @@ fn net_recv_events(
                         local_ammo.reloading = reloading;
                     }
                 }
-                EventMsg::ScaffoldSpawn { sid, owner: _owner, pos } => {
+                EventMsg::ScaffoldSpawn { sid, owner: owner_id, pos } => {
                     let p = Vec3::new(pos[0], pos[1], pos[2]);
                     let mesh = sc_assets.meshes.add(Cuboid::new(SCAFFOLD_SIZE.x, SCAFFOLD_SIZE.y, SCAFFOLD_SIZE.z));
                     let col = Color::srgba(0.2, 0.9, 1.0, 0.45);
@@ -1167,6 +1196,10 @@ fn net_recv_events(
                         ))
                         .id();
                     sc_assets.map.0.insert(sid, ent);
+                    // 自分が要求した場合はゴーストを除去
+                    if owner_id == local.id {
+                        if let Some(e) = ghost.0.take() { commands.entity(e).despawn_recursive(); }
+                    }
                 }
                 EventMsg::ScaffoldDespawn { sid } => {
                     if let Some(ent) = sc_assets.map.0.remove(&sid) {
@@ -1215,8 +1248,9 @@ fn reconcile_self(
         // 未確定入力を再適用した予測ターゲットを作る（簡易）
         let mut target = base;
         if !buf.0.is_empty() {
-            let mut vy = 0.0f32;
-            let mut used_jumps: u8 = 0;
+            let mut vy = self_auth.vy.unwrap_or(0.0);
+            // サーバで接地中なら空中ジャンプ消費を0に、空中なら1から開始（単純化）
+            let mut used_jumps: u8 = if self_auth.grounded.unwrap_or(true) { 0 } else { 1 };
             for f in buf.0.iter() {
                 let mut horiz = Vec3::ZERO;
                 let input = Vec3::new(f.mv[0], 0.0, f.mv[1]);
