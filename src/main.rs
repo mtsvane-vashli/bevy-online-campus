@@ -208,7 +208,7 @@ fn main() {
         .add_systems(Update, net_recv_snapshot)
         // replay_unconfirmed_inputs は reconcile_self に統合したため不要
         .add_systems(Update, net_recv_events)
-        .add_systems(Update, reconcile_self)
+        .add_systems(Update, reconcile_self.before(PhysicsSet::StepSimulation))
         .add_systems(Update, hud_update_hp)
         .add_systems(Update, hud_tick_hit_marker)
         .add_systems(Update, hud_tick_killlog)
@@ -1253,6 +1253,7 @@ fn net_recv_events(
 fn reconcile_self(
     time: Res<Time>,
     mut q: Query<&mut Transform, With<Player>>,
+    mut qk: Query<&mut KinematicCharacterController, With<Player>>,
     self_auth: Res<AuthoritativeSelf>,
     buf: Res<InputBuffer>,
 ) {
@@ -1286,11 +1287,19 @@ fn reconcile_self(
         // Deadband: ignore tiny differences to avoid visible jitter.
         if d <= POS_DEADBAND { return; }
         // Snap when far out-of-bounds to recover quickly.
-        if d >= POS_SNAP { tf.translation = target; return; }
-        // Smooth correction within thresholds.
-        let rate = 6.0; // per second (softer to reduce rubberband feel)
-        let step = (rate * time.delta_seconds()).min(1.0);
-        tf.translation += diff * step;
+        // ただし Transform を直接書き換えず、KCC に追加移動として与え、衝突解決に任せる。
+        if let Ok(mut kcc) = qk.get_single_mut() {
+            if d >= POS_SNAP {
+                let corr = diff; // そのまま収束させる（KCCが壁を考慮）
+                kcc.translation = Some(kcc.translation.unwrap_or(Vec3::ZERO) + corr);
+                return;
+            }
+            // Smooth correction within thresholds (collidable via KCC).
+            let rate = 6.0; // per second (softer to reduce rubberband feel)
+            let step = (rate * time.delta_seconds()).min(1.0);
+            let corr = diff * step;
+            kcc.translation = Some(kcc.translation.unwrap_or(Vec3::ZERO) + corr);
+        }
     }
     if matches!(std::env::var("RECONCILE_YAW").ok().as_deref(), Some("1" | "true" | "TRUE")) { if let Some(yaw) = self_auth.yaw {
         // 軽い追従のみ（強いワープは避ける）
