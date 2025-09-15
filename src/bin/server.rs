@@ -160,7 +160,7 @@ const BOT_PROBE_AHEAD: f32 = 1.2; // 落下防止: 前方プローブ距離
 const BOT_MAX_DROP: f32 = 0.7; // 落差しきい値
 
 // Weapon constants
-const MAG_SIZE: u16 = 12;
+const MAG_SIZE: u16 = 30;
 const RELOAD_TIME: f32 = 1.6; // sec
 const FIRE_COOLDOWN: f32 = 1.0 / 7.5; // ~450 RPM
 
