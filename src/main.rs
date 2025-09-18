@@ -17,11 +17,12 @@ use std::time::Duration;
 #[path = "net.rs"]
 mod net;
 use net::*;
+use crate::net::shared as shared_consts;
 
 // ===== Config =====
 const MAP_SCENE_PATH: &str = "maps/map.glb#Scene0"; // assets 配下に maps/map.glb を置いてください
 const PLAYER_START: Vec3 = Vec3::new(0.0, 10.0, 5.0);
-const MOVE_SPEED: f32 = 6.0; // m/s
+const MOVE_SPEED: f32 = shared_consts::MOVE_SPEED; // m/s
 const MOUSE_SENSITIVITY: f32 = 0.0018; // rad/pixel
 const HIP_FOV: f32 = 90.0_f32.to_radians();
 const ADS_FOV: f32 = 65.0_f32.to_radians();
@@ -203,6 +204,7 @@ fn main() {
             .after(net_recv_snapshot)
         )
         .add_systems(Update, net_recv_snapshot)
+        .add_systems(Update, remote_interpolate_system.after(net_recv_snapshot))
         // replay_unconfirmed_inputs は reconcile_self に統合したため不要
         .add_systems(Update, net_recv_events)
         .add_systems(Update, reconcile_self.after(net_recv_snapshot).after(net_recv_events).before(PhysicsSet::StepSimulation))
@@ -650,7 +652,10 @@ fn kcc_move_system_unified(
     if buttons.pressed(MouseButton::Right) { speed *= ADS_SPEED_MUL; }
 
     use crate::net::shared::{JUMP_BUFFER_SEC, COYOTE_SEC, JUMP_COOLDOWN_SEC};
-    let dt = time.delta_seconds();
+    // 予測誤差低減のため dt を1/60に量子化（サーバは固定60Hz）
+    let tick_dt = 1.0/60.0;
+    let mut dt = time.delta_seconds();
+    dt = (dt / tick_dt).round() * tick_dt;
     if keys.just_pressed(KeyCode::Space) { ctrl.jump_buf = JUMP_BUFFER_SEC; }
     if ctrl.jump_buf > 0.0 { ctrl.jump_buf = (ctrl.jump_buf - dt).max(0.0); }
     if ctrl.jump_cd > 0.0 { ctrl.jump_cd = (ctrl.jump_cd - dt).max(0.0); }
@@ -852,6 +857,26 @@ struct InputBuffer(std::collections::VecDeque<InputFrame>);
 #[derive(Resource, Default)]
 struct LastConfirmedSeq(Option<u32>);
 
+// 受信スナップショットの最新tickを保持（古いスナップ適用を防ぐ）
+#[derive(Resource, Default)]
+struct LastSnapshotTick(Option<u32>);
+
+// リモートアバター補間用のサンプル
+#[derive(Clone, Copy)]
+struct RemoteSample { tick: u32, pos: Vec3, yaw: f32 }
+
+// エンティティIDごとのサンプル履歴
+#[derive(Resource, Default)]
+struct RemoteHistory(std::collections::HashMap<u64, std::collections::VecDeque<RemoteSample>>);
+
+// レンダ遅延（tick数）。到着ジッタ平滑化のため既定3tick（~100ms@30Hz）
+#[derive(Resource)]
+struct InterpDelayTicks(u32);
+
+// 直近のローカル発砲記録（VFX重複抑止用）
+#[derive(Resource, Default)]
+struct RecentLocalFires(std::collections::VecDeque<(f32, Vec3, Vec3)>); // (time, origin, dir)
+
 fn setup_net_client(mut commands: Commands) {
     let (client, transport, client_id) = new_client(None);
     commands.insert_resource(client);
@@ -867,6 +892,10 @@ fn setup_net_client(mut commands: Commands) {
     commands.insert_resource(LocalAmmo { ammo: 0, reloading: false });
     commands.insert_resource(InputBuffer::default());
     commands.insert_resource(LastConfirmedSeq::default());
+    commands.insert_resource(LastSnapshotTick::default());
+    commands.insert_resource(RemoteHistory::default());
+    commands.insert_resource(InterpDelayTicks(3));
+    commands.insert_resource(RecentLocalFires::default());
 }
 
 // ===== Scaffold Systems =====
@@ -1036,10 +1065,14 @@ fn net_send_input(
     buttons: Res<ButtonInput<MouseButton>>,
     cam_q: Query<&PlayerCamera, With<Camera3d>>,
     cam_tf_q: Query<&GlobalTransform, With<Camera3d>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut client: ResMut<RenetClient>,
     mut seq: ResMut<InputSeq>,
     mut buf: ResMut<InputBuffer>,
     last_conf: Res<LastConfirmedSeq>,
+    mut recent: ResMut<RecentLocalFires>,
 ) {
     let cam = if let Ok(c) = cam_q.get_single() { c } else { return };
     let cam_tf = if let Ok(t) = cam_tf_q.get_single() { t } else { return };
@@ -1071,6 +1104,22 @@ fn net_send_input(
             if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire { origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] }) {
                 let _ = client.send_message(CH_RELIABLE, bytes);
             }
+            // ローカル即時VFX（サーバ確認を待たない）
+            let col = Color::srgb(0.95, 0.9, 0.2);
+            let mmesh = meshes.add(Cuboid::new(0.06, 0.06, 0.06));
+            let mmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
+            commands.spawn((PbrBundle { mesh: mmesh, material: mmat, transform: Transform::from_translation(origin), ..default() }, MuzzleFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
+            let seg = dir.normalize_or_zero() * 50.0; let len = seg.length();
+            if len > 0.001 {
+                let tmesh = meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
+                let tmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
+                let rot = Quat::from_rotation_arc(Vec3::Z, seg.normalize());
+                let pos = origin + seg * 0.5;
+                commands.spawn((PbrBundle { mesh: tmesh, material: tmat, transform: Transform { translation: pos, rotation: rot, scale: Vec3::ONE }, ..default() }, TracerFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
+            }
+            // 重複抑止のため記録
+            recent.0.push_back((time.elapsed_seconds(), origin, dir.normalize_or_zero()));
+            while let Some(&(t, _, _)) = recent.0.front() { if time.elapsed_seconds() - t > 0.4 { recent.0.pop_front(); } else { break; } }
         }
     }
 }
@@ -1086,6 +1135,8 @@ fn net_recv_snapshot(
     mut kinds: ResMut<ActorKindsMap>,
     mut positions: ResMut<ActorPositions>,
     mut last_conf: ResMut<LastConfirmedSeq>,
+    mut last_tick: ResMut<LastSnapshotTick>,
+    mut rhist: ResMut<RemoteHistory>,
 ) {
     while let Some(raw) = client.receive_message(CH_SNAPSHOT) {
         if let Ok(ServerMessage::Snapshot(snap)) = bincode::deserialize::<ServerMessage>(&raw) {
@@ -1094,6 +1145,9 @@ fn net_recv_snapshot(
             }
             // 入力ACK: このクライアントの直近確定seqを拾い、未確定バッファの整理に使う
             if let Some((_id, seq)) = snap.acks.iter().find(|(id, _)| *id == local.id) { last_conf.0 = Some(*seq); }
+            // 古いスナップは破棄（tick単調増加を前提）
+            if let Some(prev) = last_tick.0 { if snap.tick <= prev { continue; } }
+            last_tick.0 = Some(snap.tick);
             for p in snap.players {
                 kinds.0.insert(p.id, p.kind);
                 positions.0.insert(p.id, Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
@@ -1106,6 +1160,10 @@ fn net_recv_snapshot(
                 }
                 let pos = Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
                 if p.alive {
+                    // 補間用履歴に push（後段の補間システムが使用）
+                    let entry = rhist.0.entry(p.id).or_insert_with(|| std::collections::VecDeque::with_capacity(16));
+                    entry.push_back(RemoteSample { tick: last_tick.0.unwrap_or(0), pos, yaw: p.yaw });
+                    while entry.len() > 16 { entry.pop_front(); }
                     if let Some(&ent) = remap.0.get(&p.id) {
                         if let Some(mut ec) = commands.get_entity(ent) {
                             ec.insert(Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(p.yaw)));
@@ -1125,6 +1183,40 @@ fn net_recv_snapshot(
                     }
                 }
             }
+        }
+    }
+}
+
+// リモートアバターのTransformを補間して更新
+fn remote_interpolate_system(
+    remap: Res<RemoteMap>,
+    rhist: Res<RemoteHistory>,
+    delay: Res<InterpDelayTicks>,
+    last_tick: Res<LastSnapshotTick>,
+    mut q_tf: Query<&mut Transform>,
+){
+    let Some(latest) = last_tick.0 else { return };
+    let target_tick = latest.saturating_sub(delay.0);
+    for (id, ent) in remap.0.iter() {
+        let Some(hist) = rhist.0.get(id) else { continue };
+        if hist.is_empty() { continue; }
+        let mut a = hist.front().copied().unwrap();
+        let mut b = hist.back().copied().unwrap();
+        if target_tick <= a.tick { b = a; }
+        else if target_tick >= b.tick { a = b; }
+        else {
+            for w in hist.as_slices().0.windows(2) {
+                let x = w[0]; let y = w[1];
+                if x.tick <= target_tick && target_tick <= y.tick { a = x; b = y; break; }
+            }
+        }
+        let t = if b.tick > a.tick { (target_tick - a.tick) as f32 / (b.tick - a.tick) as f32 } else { 0.0 };
+        let pos = a.pos.lerp(b.pos, t.clamp(0.0, 1.0));
+        let dy = wrap_pi(b.yaw - a.yaw);
+        let yaw = wrap_pi(a.yaw + dy * t.clamp(0.0, 1.0));
+        if let Ok(mut tf) = q_tf.get_mut(*ent) {
+            tf.translation = pos;
+            tf.rotation = Quat::from_rotation_y(yaw);
         }
     }
 }
