@@ -242,7 +242,7 @@ fn setup_world(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 fn setup_physics(mut conf: ResMut<RapierConfiguration>) {
-    conf.gravity = Vec3::new(0.0, -GRAVITY, 0.0);
+    conf.gravity = Vec3::new(0.0, -shared_consts::GRAVITY, 0.0);
 }
 
 fn setup_player(mut commands: Commands, mut windows: Query<&mut Window>) {
@@ -583,7 +583,7 @@ fn kcc_move_system(
 
     // スピード調整（スプリント削除）
     let mut speed = MOVE_SPEED;
-    if buttons.pressed(MouseButton::Right) { speed *= ADS_SPEED_MUL; }
+    if buttons.pressed(MouseButton::Right) { speed *= shared_consts::ADS_SPEED_MUL; }
 
     // 重力・ジャンプ
     let dt = time.delta_seconds();
@@ -649,7 +649,7 @@ fn kcc_move_system_unified(
     }
 
     let mut speed = MOVE_SPEED;
-    if buttons.pressed(MouseButton::Right) { speed *= ADS_SPEED_MUL; }
+    if buttons.pressed(MouseButton::Right) { speed *= shared_consts::ADS_SPEED_MUL; }
 
     use crate::net::shared::{JUMP_BUFFER_SEC, COYOTE_SEC, JUMP_COOLDOWN_SEC};
     // 予測誤差低減のため dt を1/60に量子化（サーバは固定60Hz）
@@ -661,13 +661,13 @@ fn kcc_move_system_unified(
     if ctrl.jump_cd > 0.0 { ctrl.jump_cd = (ctrl.jump_cd - dt).max(0.0); }
     if ctrl.on_ground { ctrl.coyote = COYOTE_SEC; } else if ctrl.coyote > 0.0 { ctrl.coyote = (ctrl.coyote - dt).max(0.0); }
 
-    ctrl.vy -= GRAVITY * dt;
+    ctrl.vy -= shared_consts::GRAVITY * dt;
     let mut jumped_now = false;
     if ctrl.jump_buf > 0.0 && ctrl.jump_cd <= 0.0 {
         if ctrl.on_ground || ctrl.coyote > 0.0 {
-            ctrl.vy = JUMP_SPEED; jumped_now = true; ctrl.jump_buf = 0.0;
+            ctrl.vy = shared_consts::JUMP_SPEED; jumped_now = true; ctrl.jump_buf = 0.0;
         } else if ctrl.jumps < 1 {
-            ctrl.vy = JUMP_SPEED; ctrl.jumps = ctrl.jumps.saturating_add(1); jumped_now = true; ctrl.jump_buf = 0.0;
+            ctrl.vy = shared_consts::JUMP_SPEED; ctrl.jumps = ctrl.jumps.saturating_add(1); jumped_now = true; ctrl.jump_buf = 0.0;
         }
     }
     if jumped_now { kcc.snap_to_ground = None; ctrl.on_ground = false; ctrl.jump_cd = JUMP_COOLDOWN_SEC; }
@@ -1310,6 +1310,8 @@ fn net_recv_events(
                     }
                 }
                 EventMsg::Fire { id, origin, dir, hit } => {
+                    // 自分の発砲はローカル即時VFXを出しているため、サーバVFXは重複回避
+                    if id == local.id { continue; }
                     // VFX: muzzle + tracer (+ impact)
                     let o = Vec3::new(origin[0], origin[1], origin[2]);
                     let d = Vec3::new(dir[0], dir[1], dir[2]).normalize_or_zero();
@@ -1430,9 +1432,9 @@ fn reconcile_self(
                     horiz = (yaw_rot * input).normalize();
                 }
             let mut speed = MOVE_SPEED;
-            if f.ads { speed *= ADS_SPEED_MUL; }
-            if f.jump && (used_jumps == 0) { vy = JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
-            vy -= GRAVITY * f.dt;
+            if f.ads { speed *= shared_consts::ADS_SPEED_MUL; }
+            if f.jump && (used_jumps == 0) { vy = shared_consts::JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
+            vy -= shared_consts::GRAVITY * f.dt;
             target += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
         }
         }
@@ -1490,9 +1492,9 @@ fn replay_unconfirmed_inputs(
         }
         let mut speed = MOVE_SPEED;
         // jump
-        if f.jump && (used_jumps == 0) { vy = JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
+        if f.jump && (used_jumps == 0) { vy = shared_consts::JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
         // integrate
-        vy -= GRAVITY * f.dt;
+        vy -= shared_consts::GRAVITY * f.dt;
         pos += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
     }
     tf.translation = pos;
