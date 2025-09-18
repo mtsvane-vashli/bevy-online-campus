@@ -93,7 +93,7 @@ pub mod shared {
     pub const JUMP_BUFFER_SEC: f32 = 0.12;
     pub const COYOTE_SEC: f32 = 0.10;
     pub const JUMP_COOLDOWN_SEC: f32 = 0.15;
-    pub const PLAYER_START: [f32; 3] = [0.0, 10.0, 5.0];
+    pub const PLAYER_START: [f32; 3] = [0.0, 100.0, 5.0];
 }
 
 pub fn new_server() -> (RenetServer, NetcodeServerTransport) {
