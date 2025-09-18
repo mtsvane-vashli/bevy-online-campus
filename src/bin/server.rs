@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 #[path = "../net.rs"]
 mod net;
 use crate::net::*;
+use crate::net::shared as shared_consts;
 
 #[derive(Resource, Default)]
 struct Players {
@@ -186,6 +187,7 @@ const BOT_SPREAD_DIST_K: f32 = 0.01; // 距離による拡散増加
 const BOT_AIRBORNE_SPREAD_MUL: f32 = 1.5; // 空中ターゲット拡散倍率
 
 const SPAWN_JITTER_RADIUS: f32 = 6.0; // スポーン分散半径
+const DEFAULT_SPAWN_POS: Vec3 = Vec3::from_array(shared_consts::PLAYER_START);
 const PROTECT_SEC: f32 = 2.0; // リスポーン保護（無敵・発砲不可）
 
 // --- Lag compensation params ---
@@ -413,7 +415,7 @@ fn ensure_bots(
     // 既に規定数いれば何もしない
     if bots.states.len() >= DESIRED_BOTS { return; }
     // スポーン位置
-    let base_pos = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { Vec3::new(0.0, 10.0, 5.0) };
+    let base_pos = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { DEFAULT_SPAWN_POS };
     while bots.states.len() < DESIRED_BOTS {
         let id = { let cur = next_id.0; next_id.0 += 1; cur };
         let mut pos = base_pos;
@@ -1122,7 +1124,7 @@ fn bot_ai_shoot_and_respawn(
     for bid in to_spawn {
         respawns_bots.0.remove(&bid);
         if let Some(b) = bots.states.get_mut(&bid) {
-            let mut spawn = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { Vec3::new(0.0, 10.0, 5.0) };
+            let mut spawn = if !spawns.0.is_empty() { spawns.0[rand::random::<usize>() % spawns.0.len()] } else { DEFAULT_SPAWN_POS };
             // ジッターで分散
             let jitter = Vec3::new((rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS, 0.0, (rand::random::<f32>()-0.5)*2.0*SPAWN_JITTER_RADIUS);
             spawn += jitter;
@@ -1502,10 +1504,10 @@ fn collect_spawn_points_from_map(
 fn choose_spawn_point(spawns: &SpawnPoints, players: &Players) -> Vec3 {
     // 環境変数でスポーン点機能を一時無効化（デバッグ用）
     if matches!(env::var("USE_SPAWN_POINTS").ok().as_deref(), Some("0" | "false" | "False")) {
-        return Vec3::new(0.0, 10.0, 5.0);
+        return DEFAULT_SPAWN_POS;
     }
     if spawns.0.is_empty() {
-        return Vec3::new(0.0, 10.0, 5.0);
+        return DEFAULT_SPAWN_POS;
     }
     let mut best_pos = spawns.0[0];
     let mut best_score = f32::MIN;

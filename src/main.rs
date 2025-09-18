@@ -21,7 +21,7 @@ use crate::net::shared as shared_consts;
 
 // ===== Config =====
 const MAP_SCENE_PATH: &str = "maps/map.glb#Scene0"; // assets 配下に maps/map.glb を置いてください
-const PLAYER_START: Vec3 = Vec3::new(0.0, 10.0, 5.0);
+const PLAYER_START: Vec3 = Vec3::from_array(shared_consts::PLAYER_START);
 const MOVE_SPEED: f32 = shared_consts::MOVE_SPEED; // m/s
 const MOUSE_SENSITIVITY: f32 = 0.0018; // rad/pixel
 const HIP_FOV: f32 = 90.0_f32.to_radians();
