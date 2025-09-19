@@ -89,6 +89,7 @@ pub mod shared {
     pub const ADS_SPEED_MUL: f32 = 0.6;
     pub const GRAVITY: f32 = 9.81;
     pub const JUMP_SPEED: f32 = 5.2;
+    pub const GROUND_NORMAL_MIN_Y: f32 = 0.5;
     // サーバと同じジャンプ品質パラメータ（バッファ/コヨーテ/クールダウン）
     pub const JUMP_BUFFER_SEC: f32 = 0.12;
     pub const COYOTE_SEC: f32 = 0.10;

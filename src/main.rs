@@ -619,7 +619,7 @@ fn kcc_post_step_system(
                 // 壁など浅い法線で接地扱いになったケースを記録
                 if let Some(details) = col.hit.details {
                     let normal: Vec3 = details.normal1.into();
-                    if normal.y >= 0.5 {
+                    if normal.y >= shared_consts::GROUND_NORMAL_MIN_Y {
                         grounded_by_floor = true;
                     } else {
                         shallow_contacts.push((col.entity, normal));

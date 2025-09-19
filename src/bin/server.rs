@@ -902,16 +902,55 @@ fn srv_kcc_post(
         let Some(&entity) = ents.0.get(id) else { continue };
         if let Ok((gt, out)) = q.get(entity) {
             state.pos = gt.translation();
+            let mut shallow_debug: Option<(f32, Vec<(Entity, Vec3)>)> = None;
+            let mut grounded_by_floor = false;
             if let Some(o) = out {
                 state.grounded = o.grounded;
                 if o.grounded && state.vy <= 0.0 {
-                    state.vy = 0.0;
-                    if let Some(j) = jumps.0.get_mut(id) { *j = 0; }
+                    let prev_vy = state.vy;
+                    let mut shallow_contacts = Vec::new();
+                    for col in &o.collisions {
+                        if let Some(details) = col.hit.details {
+                            let normal: Vec3 = details.normal1.into();
+                            if normal.y >= shared_consts::GROUND_NORMAL_MIN_Y {
+                                grounded_by_floor = true;
+                            } else {
+                                shallow_contacts.push((col.entity, normal));
+                            }
+                        }
+                    }
+                    if grounded_by_floor {
+                        state.vy = 0.0;
+                        if let Some(j) = jumps.0.get_mut(id) { *j = 0; }
+                    } else if !shallow_contacts.is_empty() {
+                        shallow_debug = Some((prev_vy, shallow_contacts));
+                    }
                 }
+                if !grounded_by_floor {
+                    state.grounded = false;
+                }
+            } else {
+                state.grounded = false;
             }
-            // re-enable snap_to_ground after physics step (if it was disabled for jump)
             if let Ok(mut kcc) = qk.get_mut(entity) {
-                if kcc.snap_to_ground.is_none() { kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25)); }
+                if let Some((prev_vy, shallow_contacts)) = shallow_debug.take() {
+                    let normals: Vec<String> = shallow_contacts
+                        .iter()
+                        .map(|(entity, normal)| format!("{:?}:({:.2},{:.2},{:.2})", entity, normal.x, normal.y, normal.z))
+                        .collect();
+                    info!(
+                        target: "kcc::grounding",
+                        "server shallow normal prev_vy={:.3} snap_to_ground={} normals={:?}",
+                        prev_vy,
+                        kcc.snap_to_ground.is_some(),
+                        normals,
+                    );
+                    kcc.snap_to_ground = None;
+                } else if state.grounded {
+                    if kcc.snap_to_ground.is_none() { kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25)); }
+                } else {
+                    kcc.snap_to_ground = None;
+                }
             }
         }
     }
@@ -928,16 +967,56 @@ fn bot_kcc_post(
         let Some(&entity) = bot_ents.0.get(id) else { continue };
         if let Ok((gt, out)) = q.get(entity) {
             state.pos = gt.translation();
+            let mut shallow_debug: Option<(f32, Vec<(Entity, Vec3)>)> = None;
+            let mut grounded_by_floor = false;
             if let Some(o) = out {
                 state.grounded = o.grounded;
                 if o.grounded && state.vy <= 0.0 {
-                    state.vy = 0.0;
-                    // 安全位置の更新
-                    safe.0.insert(*id, state.pos);
+                    let prev_vy = state.vy;
+                    let mut shallow_contacts = Vec::new();
+                    for col in &o.collisions {
+                        if let Some(details) = col.hit.details {
+                            let normal: Vec3 = details.normal1.into();
+                            if normal.y >= shared_consts::GROUND_NORMAL_MIN_Y {
+                                grounded_by_floor = true;
+                            } else {
+                                shallow_contacts.push((col.entity, normal));
+                            }
+                        }
+                    }
+                    if grounded_by_floor {
+                        state.vy = 0.0;
+                        // 最終位置の更新
+                        safe.0.insert(*id, state.pos);
+                    } else if !shallow_contacts.is_empty() {
+                        shallow_debug = Some((prev_vy, shallow_contacts));
+                    }
                 }
+                if !grounded_by_floor {
+                    state.grounded = false;
+                }
+            } else {
+                state.grounded = false;
             }
             if let Ok(mut kcc) = qk.get_mut(entity) {
-                if kcc.snap_to_ground.is_none() { kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25)); }
+                if let Some((prev_vy, shallow_contacts)) = shallow_debug.take() {
+                    let normals: Vec<String> = shallow_contacts
+                        .iter()
+                        .map(|(entity, normal)| format!("{:?}:({:.2},{:.2},{:.2})", entity, normal.x, normal.y, normal.z))
+                        .collect();
+                    info!(
+                        target: "kcc::grounding",
+                        "server bot shallow normal prev_vy={:.3} snap_to_ground={} normals={:?}",
+                        prev_vy,
+                        kcc.snap_to_ground.is_some(),
+                        normals,
+                    );
+                    kcc.snap_to_ground = None;
+                } else if state.grounded {
+                    if kcc.snap_to_ground.is_none() { kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25)); }
+                } else {
+                    kcc.snap_to_ground = None;
+                }
             }
         }
     }
