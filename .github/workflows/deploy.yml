@@ -27,35 +27,22 @@ jobs:
         key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
         script: |
           set -e # コマンドが失敗したら即座にスクリプトを終了する
-
-          echo "--- Starting Deployment ---"
-          echo "Executing as user: $(whoami)"
           
           cd ~/bevy-online-campus
-          echo "Changed directory to: $(pwd)"
           
-          echo "--- Checking git status before pull ---"
           git status
           
-          echo "--- Pulling latest code ---"
           git pull
           
-          echo "--- Sourcing cargo environment ---"
           source "$HOME/.cargo/env"
           
-          echo "--- Checking cargo version ---"
           cargo --version
           
-          echo "--- Building server binary ---"
           cargo build --release --bin server
           
-          echo "--- Updating server binary using sudo ---"
           sudo cp target/release/server /opt/bevy/server.new
           sudo chmod +x /opt/bevy/server.new
           sudo mv /opt/bevy/server /opt/bevy/server.prev || true
           sudo mv /opt/bevy/server.new /opt/bevy/server
           
-          echo "--- Restarting bevy-server service ---"
           sudo systemctl restart bevy-server
-          
-          echo "--- Deployment completed successfully! ---"
