@@ -1,23 +1,23 @@
-﻿// #![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
-use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::render::camera::Projection;
 use bevy::window::CursorGrabMode;
 use bevy::window::WindowFocused;
 use bevy_rapier3d::prelude::*;
-use bevy::ecs::system::SystemParam;
-use bevy_renet::RenetClientPlugin;
-use bevy_renet::transport::NetcodeClientPlugin;
 use bevy_renet::renet::RenetClient;
-use bevy::render::camera::Projection;
+use bevy_renet::transport::NetcodeClientPlugin;
+use bevy_renet::RenetClientPlugin;
 use std::f32::consts::PI;
 use std::time::Duration;
 
 #[path = "net.rs"]
 mod net;
-use net::*;
 use crate::net::shared as shared_consts;
+use net::*;
 
 // ===== Config =====
 const MAP_SCENE_PATH: &str = "maps/map.glb#Scene0"; // assets 配下に maps/map.glb を置いてください
@@ -31,7 +31,7 @@ const ADS_SPEED_MUL: f32 = 0.6; // ADS中の移動速度倍率
 const GRAVITY: f32 = 9.81; // m/s^2
 const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
 const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
-// Position reconciliation thresholds (light server convergence)
+                                 // Position reconciliation thresholds (light server convergence)
 const POS_DEADBAND: f32 = 0.05; // meters: small jitterを無視して安定化
 const POS_SNAP: f32 = 0.8; // meters: 乖離が大きい時のみスナップ
 
@@ -52,13 +52,17 @@ struct UiFps;
 struct FpsTextTimer(Timer);
 
 #[derive(Component)]
-struct UiHitMarker { timer: Timer }
+struct UiHitMarker {
+    timer: Timer,
+}
 
 #[derive(Component)]
 struct UiKillLog;
 
 #[derive(Component)]
-struct UiKillEntry { timer: Timer }
+struct UiKillEntry {
+    timer: Timer,
+}
 
 #[derive(Component)]
 struct UiScoreboard;
@@ -70,20 +74,33 @@ struct ScoreData(Vec<(u64, u32, u32)>); // (id, kills, deaths)
 struct ScoreVisible(bool);
 
 #[derive(Resource, Default)]
-struct RoundUi { phase_end: Option<Timer>, time_left: f32, winner: Option<u64> }
+struct RoundUi {
+    phase_end: Option<Timer>,
+    time_left: f32,
+    winner: Option<u64>,
+}
 
 #[derive(Resource, Default)]
-struct LocalAmmo { ammo: u16, reloading: bool }
+struct LocalAmmo {
+    ammo: u16,
+    reloading: bool,
+}
 
 // VFX components
 #[derive(Component)]
-struct MuzzleFx { timer: Timer }
+struct MuzzleFx {
+    timer: Timer,
+}
 
 #[derive(Component)]
-struct TracerFx { timer: Timer }
+struct TracerFx {
+    timer: Timer,
+}
 
 #[derive(Component)]
-struct ImpactFx { timer: Timer }
+struct ImpactFx {
+    timer: Timer,
+}
 
 #[derive(Resource, Default)]
 struct ActorKindsMap(std::collections::HashMap<u64, ActorKind>);
@@ -92,7 +109,9 @@ struct ActorKindsMap(std::collections::HashMap<u64, ActorKind>);
 struct ActorPositions(std::collections::HashMap<u64, Vec3>);
 
 #[derive(Component)]
-struct UiDamageVignette { timer: Timer }
+struct UiDamageVignette {
+    timer: Timer,
+}
 
 #[derive(Component)]
 struct Player;
@@ -130,14 +149,20 @@ const SCAFFOLD_LIFETIME: f32 = 10.0; // seconds
 const SCAFFOLD_PER_PLAYER_LIMIT: usize = 3;
 
 #[derive(Component)]
-struct Scaffold { hp: i32, life: Timer, owner: u64 }
+struct Scaffold {
+    hp: i32,
+    life: Timer,
+    owner: u64,
+}
 
 #[derive(Resource, Default)]
 struct LocalScaffolds(Vec<Entity>); // FIFO 管理（ローカルプレイヤー用）
 
 // ネット同期された足場（サーバ権威）
 #[derive(Component)]
-struct NetScaffold { sid: u64 }
+struct NetScaffold {
+    sid: u64,
+}
 
 #[derive(Resource, Default)]
 struct NetScaffoldMap(std::collections::HashMap<u64, Entity>);
@@ -160,7 +185,10 @@ struct NetScaffoldAssets<'w, 's> {
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
-        .insert_resource(AmbientLight { color: Color::WHITE, brightness: 300.0 })
+        .insert_resource(AmbientLight {
+            color: Color::WHITE,
+            brightness: 300.0,
+        })
         .insert_resource(CursorLocked(true))
         .insert_resource(MapReady(false))
         .insert_resource(ConnStatePrev::default())
@@ -173,7 +201,14 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Bevy FPS".into(),
-                present_mode: if matches!(std::env::var("NO_VSYNC").ok().as_deref(), Some("1" | "true" | "TRUE")) { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync },
+                present_mode: if matches!(
+                    std::env::var("NO_VSYNC").ok().as_deref(),
+                    Some("1" | "true" | "TRUE")
+                ) {
+                    bevy::window::PresentMode::AutoNoVsync
+                } else {
+                    bevy::window::PresentMode::AutoVsync
+                },
                 ..default()
             }),
             ..default()
@@ -185,7 +220,17 @@ fn main() {
             // デバッグ表示が欲しい場合は下を有効化
             // RapierDebugRenderPlugin::default(),
         ))
-        .add_systems(Startup, (setup_world, setup_ui, setup_physics, setup_net_client, setup_player, setup_hud))
+        .add_systems(
+            Startup,
+            (
+                setup_world,
+                setup_ui,
+                setup_physics,
+                setup_net_client,
+                setup_player,
+                setup_hud,
+            ),
+        )
         .add_systems(Update, handle_focus_events)
         .add_systems(Update, cursor_lock_controls)
         .add_systems(Update, mouse_look_system)
@@ -196,19 +241,30 @@ fn main() {
         .add_systems(Update, net_log_connection)
         .add_systems(Update, net_recv_snapshot)
         .add_systems(Update, remote_interpolate_system.after(net_recv_snapshot))
-        .add_systems(Update, net_send_input
-            .after(mouse_look_system)
-            .after(keyboard_look_system)
-            .after(cursor_lock_controls)
-            .after(handle_focus_events)
-            .after(net_recv_snapshot)
+        .add_systems(
+            Update,
+            net_send_input
+                .after(mouse_look_system)
+                .after(keyboard_look_system)
+                .after(cursor_lock_controls)
+                .after(handle_focus_events)
+                .after(net_recv_snapshot),
         )
         .add_systems(Update, kcc_move_system_unified.after(net_send_input))
         .add_systems(Update, kcc_post_step_system.after(kcc_move_system_unified))
-        .add_systems(Update, client_airborne_snap_control.after(kcc_post_step_system))
+        .add_systems(
+            Update,
+            client_airborne_snap_control.after(kcc_post_step_system),
+        )
         // replay_unconfirmed_inputs は reconcile_self に統合したため不要
         .add_systems(Update, net_recv_events)
-        .add_systems(Update, reconcile_self.after(net_recv_snapshot).after(net_recv_events).before(PhysicsSet::StepSimulation))
+        .add_systems(
+            Update,
+            reconcile_self
+                .after(net_recv_snapshot)
+                .after(net_recv_events)
+                .before(PhysicsSet::StepSimulation),
+        )
         .add_systems(Update, hud_update_hp)
         .add_systems(Update, hud_tick_hit_marker)
         .add_systems(Update, hud_tick_killlog)
@@ -228,18 +284,18 @@ fn setup_world(mut commands: Commands, asset_server: Res<AssetServer>) {
     });
 
     // 環境光は Resource で設定済み。補助の方向ライトを追加
-    commands.spawn((
-        DirectionalLightBundle {
-            directional_light: DirectionalLight {
-                shadows_enabled: !matches!(std::env::var("LOW_GFX").ok().as_deref(), Some("1" | "true" | "TRUE")),
-                illuminance: 30_000.0,
-                ..default()
-            },
-            transform: Transform::from_xyz(10.0, 12.0, 8.0)
-                .looking_at(Vec3::ZERO, Vec3::Y),
+    commands.spawn((DirectionalLightBundle {
+        directional_light: DirectionalLight {
+            shadows_enabled: !matches!(
+                std::env::var("LOW_GFX").ok().as_deref(),
+                Some("1" | "true" | "TRUE")
+            ),
+            illuminance: 30_000.0,
             ..default()
         },
-    ));
+        transform: Transform::from_xyz(10.0, 12.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    },));
 }
 
 fn setup_physics(mut conf: ResMut<RapierConfiguration>) {
@@ -260,13 +316,13 @@ fn setup_player(mut commands: Commands, mut windows: Query<&mut Window>) {
         .insert({
             let mut kcc = KinematicCharacterController::default();
             // サーバと同一のオートステップ/スナップに合わせる
-            kcc.autostep = Some(CharacterAutostep { max_height: CharacterLength::Absolute(0.5), min_width: CharacterLength::Absolute(0.3), include_dynamic_bodies: true });
+            kcc.autostep = Some(CharacterAutostep {
+                max_height: CharacterLength::Absolute(0.5),
+                min_width: CharacterLength::Absolute(0.3),
+                include_dynamic_bodies: true,
+            });
             kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
-            (
-                Collider::capsule_y(0.6, 0.3),
-                kcc,
-                Controller::default(),
-            )
+            (Collider::capsule_y(0.6, 0.3), kcc, Controller::default())
         })
         .id();
 
@@ -274,12 +330,24 @@ fn setup_player(mut commands: Commands, mut windows: Query<&mut Window>) {
     // 目線の高さ（プレイヤー中心から +0.7m）
     let cam = Camera3dBundle {
         transform: Transform::from_xyz(0.0, 0.7, 0.0),
-        camera: Camera { hdr: !matches!(std::env::var("LOW_GFX").ok().as_deref(), Some("1" | "true" | "TRUE")), ..default() },
+        camera: Camera {
+            hdr: !matches!(
+                std::env::var("LOW_GFX").ok().as_deref(),
+                Some("1" | "true" | "TRUE")
+            ),
+            ..default()
+        },
         ..default()
     };
 
     commands.entity(player).with_children(|p| {
-        p.spawn((cam, PlayerCamera { yaw: 0.0, pitch: 0.0 }));
+        p.spawn((
+            cam,
+            PlayerCamera {
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+        ));
     });
 
     // カーソルをロック
@@ -291,26 +359,28 @@ fn setup_player(mut commands: Commands, mut windows: Query<&mut Window>) {
 
 fn setup_ui(mut commands: Commands) {
     // 画面中央に簡易クロスヘア
-    commands.spawn(NodeBundle {
-        style: Style {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
-        background_color: BackgroundColor(Color::NONE),
-        ..default()
-    }).with_children(|parent| {
-        parent.spawn(TextBundle::from_section(
-            "+",
-            TextStyle {
-                font_size: 28.0,
-                color: Color::BLACK,
+    commands
+        .spawn(NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             },
-        ));
-    });
+            background_color: BackgroundColor(Color::NONE),
+            ..default()
+        })
+        .with_children(|parent| {
+            parent.spawn(TextBundle::from_section(
+                "+",
+                TextStyle {
+                    font_size: 28.0,
+                    color: Color::BLACK,
+                    ..default()
+                },
+            ));
+        });
 }
 
 fn cursor_lock_controls(
@@ -319,7 +389,11 @@ fn cursor_lock_controls(
     mut win_q: Query<&mut Window>,
     mut locked: ResMut<CursorLocked>,
 ) {
-    let mut win = if let Ok(w) = win_q.get_single_mut() { w } else { return };
+    let mut win = if let Ok(w) = win_q.get_single_mut() {
+        w
+    } else {
+        return;
+    };
 
     // Esc で解除、左クリックで再ロック
     if keys.just_pressed(KeyCode::Escape) {
@@ -344,6 +418,7 @@ fn cursor_lock_controls(
 fn mouse_look_system(
     mut mouse_evr: EventReader<MouseMotion>,
     locked: Res<CursorLocked>,
+    keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut q: ParamSet<(
         Query<&mut Transform, (With<Player>, Without<Camera3d>)>,
@@ -360,7 +435,8 @@ fn mouse_look_system(
         delta += ev.delta;
     }
     // 微小ノイズ（トラックパッド等）を無視するデッドゾーン
-    if delta.length_squared() < 0.04 { // ~0.2px 相当
+    if delta.length_squared() < 0.04 {
+        // ~0.2px 相当
         return;
     }
 
@@ -369,8 +445,15 @@ fn mouse_look_system(
     let mut new_pitch: f32 = 0.0;
     {
         let mut cam_query = q.p1();
-        let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else { return };
-        let sens_mul = if buttons.pressed(MouseButton::Right) { ADS_SENS_MUL } else { 1.0 };
+        let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else {
+            return;
+        };
+        let ads_key = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        let sens_mul = if buttons.pressed(MouseButton::Right) || ads_key {
+            ADS_SENS_MUL
+        } else {
+            1.0
+        };
         let sens = MOUSE_SENSITIVITY * sens_mul;
         pcam.yaw = wrap_pi(pcam.yaw - delta.x * sens);
         pcam.pitch = (pcam.pitch - delta.y * sens).clamp(-1.54, 1.54);
@@ -391,9 +474,18 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
             "HP: 100",
-            TextStyle { font_size: 36.0, color: Color::BLACK, ..default() },
+            TextStyle {
+                font_size: 36.0,
+                color: Color::BLACK,
+                ..default()
+            },
         )
-        .with_style(Style { position_type: PositionType::Absolute, left: Val::Px(10.0), bottom: Val::Px(10.0), ..default() }),
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            left: Val::Px(10.0),
+            bottom: Val::Px(10.0),
+            ..default()
+        }),
         UiHp,
     ));
 
@@ -401,9 +493,18 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
             "FPS: --",
-            TextStyle { font_size: 18.0, color: Color::BLACK, ..default() },
+            TextStyle {
+                font_size: 18.0,
+                color: Color::BLACK,
+                ..default()
+            },
         )
-        .with_style(Style { position_type: PositionType::Absolute, left: Val::Px(10.0), top: Val::Px(10.0), ..default() }),
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            left: Val::Px(10.0),
+            top: Val::Px(10.0),
+            ..default()
+        }),
         UiFps,
     ));
 
@@ -412,12 +513,23 @@ fn setup_hud(mut commands: Commands) {
         TextBundle {
             text: Text::from_section(
                 "x",
-                TextStyle { font_size: 40.0, color: Color::srgba(0.0, 0.0, 0.0, 0.0), ..default() },
+                TextStyle {
+                    font_size: 40.0,
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.0),
+                    ..default()
+                },
             ),
-            style: Style { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), ..default() },
+            style: Style {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                ..default()
+            },
             ..default()
         },
-        UiHitMarker { timer: Timer::from_seconds(0.0, TimerMode::Once) },
+        UiHitMarker {
+            timer: Timer::from_seconds(0.0, TimerMode::Once),
+        },
     ));
 
     // キルログ（右上、縦積み）
@@ -459,9 +571,18 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
             "",
-            TextStyle { font_size: 32.0, color: Color::BLACK, ..default() },
+            TextStyle {
+                font_size: 32.0,
+                color: Color::BLACK,
+                ..default()
+            },
         )
-        .with_style(Style { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Px(12.0), ..default() }),
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(50.0),
+            top: Val::Px(12.0),
+            ..default()
+        }),
         UiRoundText,
     ));
 
@@ -469,9 +590,18 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
             "Ammo: 0",
-            TextStyle { font_size: 28.0, color: Color::BLACK, ..default() },
+            TextStyle {
+                font_size: 28.0,
+                color: Color::BLACK,
+                ..default()
+            },
         )
-        .with_style(Style { position_type: PositionType::Absolute, right: Val::Px(10.0), bottom: Val::Px(10.0), ..default() }),
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            right: Val::Px(10.0),
+            bottom: Val::Px(10.0),
+            ..default()
+        }),
         UiAmmo,
     ));
 }
@@ -491,7 +621,13 @@ fn round_ui_tick(
         if let Some(timer) = ui.phase_end.as_mut() {
             timer.tick(time.delta());
             let remain = (timer.duration().as_secs_f32() - timer.elapsed_secs()).max(0.0);
-            t.sections[0].value = format!("Round End{}  Next: {:.0}s", ui.winner.map(|w| format!("  Winner {}", w)).unwrap_or_default(), remain);
+            t.sections[0].value = format!(
+                "Round End{}  Next: {:.0}s",
+                ui.winner
+                    .map(|w| format!("  Winner {}", w))
+                    .unwrap_or_default(),
+                remain
+            );
         } else {
             ui.time_left = (ui.time_left - time.delta_seconds()).max(0.0);
             let m = (ui.time_left as i32 / 60).max(0);
@@ -535,15 +671,21 @@ fn keyboard_look_system(
     )>,
 ) {
     let dt = time.delta_seconds();
-    let horiz = (keys.pressed(KeyCode::ArrowRight) as i32 - keys.pressed(KeyCode::ArrowLeft) as i32) as f32;
-    let vert = (keys.pressed(KeyCode::ArrowDown) as i32 - keys.pressed(KeyCode::ArrowUp) as i32) as f32;
-    if horiz == 0.0 && vert == 0.0 { return; }
+    let horiz =
+        (keys.pressed(KeyCode::ArrowRight) as i32 - keys.pressed(KeyCode::ArrowLeft) as i32) as f32;
+    let vert =
+        (keys.pressed(KeyCode::ArrowDown) as i32 - keys.pressed(KeyCode::ArrowUp) as i32) as f32;
+    if horiz == 0.0 && vert == 0.0 {
+        return;
+    }
 
     let mut new_yaw = 0.0f32;
     let mut new_pitch = 0.0f32;
     {
         let mut cam_query = q.p1();
-        let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else { return };
+        let Ok((mut cam_tf, mut pcam)) = cam_query.get_single_mut() else {
+            return;
+        };
         // 矢印キー: 右=右回転（マウスの正方向と同じく yaw を減算）、上=上向き（pitch 減算）
         pcam.yaw = wrap_pi(pcam.yaw - horiz * KEY_LOOK_SPEED * dt);
         pcam.pitch = (pcam.pitch - vert * KEY_LOOK_SPEED * dt).clamp(-1.54, 1.54);
@@ -565,16 +707,34 @@ fn kcc_move_system(
     mut q: Query<(&mut KinematicCharacterController, &mut Controller), With<Player>>,
     ready: Res<MapReady>,
 ) {
-    if !ready.0 { return; }
-    let (mut kcc, mut ctrl) = if let Ok(v) = q.get_single_mut() { v } else { return };
-    let cam = if let Ok(v) = cam_q.get_single() { v } else { return };
+    if !ready.0 {
+        return;
+    }
+    let (mut kcc, mut ctrl) = if let Ok(v) = q.get_single_mut() {
+        v
+    } else {
+        return;
+    };
+    let cam = if let Ok(v) = cam_q.get_single() {
+        v
+    } else {
+        return;
+    };
 
     // 入力（水平面）
     let mut input = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) { input += Vec3::NEG_Z; }
-    if keys.pressed(KeyCode::KeyS) { input += Vec3::Z; }
-    if keys.pressed(KeyCode::KeyA) { input += Vec3::NEG_X; }
-    if keys.pressed(KeyCode::KeyD) { input += Vec3::X; }
+    if keys.pressed(KeyCode::KeyW) {
+        input += Vec3::NEG_Z;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        input += Vec3::Z;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        input += Vec3::NEG_X;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        input += Vec3::X;
+    }
 
     let mut horiz = Vec3::ZERO;
     if input.length_squared() > 1e-6 {
@@ -584,7 +744,10 @@ fn kcc_move_system(
 
     // スピード調整（スプリント削除）
     let mut speed = MOVE_SPEED;
-    if buttons.pressed(MouseButton::Right) { speed *= shared_consts::ADS_SPEED_MUL; }
+    let ads_key = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if buttons.pressed(MouseButton::Right) || ads_key {
+        speed *= shared_consts::ADS_SPEED_MUL;
+    }
 
     // 重力・ジャンプ
     let dt = time.delta_seconds();
@@ -593,7 +756,9 @@ fn kcc_move_system(
         // 地上なら通常ジャンプ、空中なら1回だけ追加ジャンプを許可
         if ctrl.on_ground || ctrl.jumps < 1 {
             ctrl.vy = JUMP_SPEED;
-            if !ctrl.on_ground { ctrl.jumps = ctrl.jumps.saturating_add(1); }
+            if !ctrl.on_ground {
+                ctrl.jumps = ctrl.jumps.saturating_add(1);
+            }
             ctrl.on_ground = false;
             // サーバと一致: このフレームは地面スナップを無効化して初速を確実に反映
             kcc.snap_to_ground = None;
@@ -608,7 +773,11 @@ fn kcc_post_step_system(
     mut q: Query<(&mut Controller, Option<&KinematicCharacterControllerOutput>), With<Player>>,
     mut qk: Query<&mut KinematicCharacterController, With<Player>>,
 ) {
-    let (mut ctrl, output) = if let Ok(v) = q.get_single_mut() { v } else { return };
+    let (mut ctrl, output) = if let Ok(v) = q.get_single_mut() {
+        v
+    } else {
+        return;
+    };
     let mut shallow_debug: Option<(f32, Vec<(Entity, Vec3)>)> = None;
     if let Some(out) = output {
         ctrl.on_ground = out.grounded;
@@ -643,7 +812,12 @@ fn kcc_post_step_system(
         if let Some((prev_vy, shallow_contacts)) = shallow_debug.take() {
             let normals: Vec<String> = shallow_contacts
                 .iter()
-                .map(|(entity, normal)| format!("{:?}:({:.2},{:.2},{:.2})", entity, normal.x, normal.y, normal.z))
+                .map(|(entity, normal)| {
+                    format!(
+                        "{:?}:({:.2},{:.2},{:.2})",
+                        entity, normal.x, normal.y, normal.z
+                    )
+                })
                 .collect();
             info!(
                 target: "kcc::grounding",
@@ -674,7 +848,12 @@ fn kcc_move_system_unified(
         pending.0.clear();
         return;
     }
-    let (mut kcc, mut ctrl) = if let Ok(pair) = q.get_single_mut() { pair } else { pending.0.clear(); return; };
+    let (mut kcc, mut ctrl) = if let Ok(pair) = q.get_single_mut() {
+        pair
+    } else {
+        pending.0.clear();
+        return;
+    };
     if pending.0.is_empty() {
         kcc.translation = Some(Vec3::ZERO);
         return;
@@ -684,9 +863,15 @@ fn kcc_move_system_unified(
     let mut disable_snap = false;
 
     while let Some(frame) = pending.0.pop_front() {
-        if frame.jump { ctrl.jump_buf = shared_consts::JUMP_BUFFER_SEC; }
-        if ctrl.jump_buf > 0.0 { ctrl.jump_buf = (ctrl.jump_buf - frame.dt).max(0.0); }
-        if ctrl.jump_cd > 0.0 { ctrl.jump_cd = (ctrl.jump_cd - frame.dt).max(0.0); }
+        if frame.jump {
+            ctrl.jump_buf = shared_consts::JUMP_BUFFER_SEC;
+        }
+        if ctrl.jump_buf > 0.0 {
+            ctrl.jump_buf = (ctrl.jump_buf - frame.dt).max(0.0);
+        }
+        if ctrl.jump_cd > 0.0 {
+            ctrl.jump_cd = (ctrl.jump_cd - frame.dt).max(0.0);
+        }
         if ctrl.on_ground {
             ctrl.coyote = shared_consts::COYOTE_SEC;
             ctrl.jumps = 0;
@@ -716,7 +901,9 @@ fn kcc_move_system_unified(
             horiz = (yaw_rot * input).normalize();
         }
         let mut speed = MOVE_SPEED;
-        if frame.ads { speed *= shared_consts::ADS_SPEED_MUL; }
+        if frame.ads {
+            speed *= shared_consts::ADS_SPEED_MUL;
+        }
         let motion = horiz * speed * frame.dt + Vec3::Y * ctrl.vy * frame.dt;
         total_motion += motion;
 
@@ -727,17 +914,22 @@ fn kcc_move_system_unified(
         }
     }
 
-    if disable_snap { kcc.snap_to_ground = None; }
+    if disable_snap {
+        kcc.snap_to_ground = None;
+    }
     kcc.translation = Some(total_motion);
 }
-
 
 // 空中時は地面スナップを無効化して「地上にワープ」する補正を防ぐ。
 fn client_airborne_snap_control(
     mut qk: Query<&mut KinematicCharacterController, With<Player>>,
     q: Query<&Controller, With<Player>>,
-){
-    let ctrl = if let Ok(c) = q.get_single() { c } else { return };
+) {
+    let ctrl = if let Ok(c) = q.get_single() {
+        c
+    } else {
+        return;
+    };
     if let Ok(mut kcc) = qk.get_single_mut() {
         if ctrl.on_ground {
             if kcc.snap_to_ground.is_none() {
@@ -830,7 +1022,11 @@ fn hud_tick_hit_marker(time: Res<Time>, mut q: Query<(&mut UiHitMarker, &mut Tex
     if let Ok((mut hm, mut text)) = q.get_single_mut() {
         hm.timer.tick(time.delta());
         let d = hm.timer.duration().as_secs_f32();
-        let alpha = if d <= 0.0 { 0.0 } else { (d - hm.timer.elapsed_secs()).max(0.0) / d };
+        let alpha = if d <= 0.0 {
+            0.0
+        } else {
+            (d - hm.timer.elapsed_secs()).max(0.0) / d
+        };
         text.sections[0].style.color = Color::srgba(0.0, 0.0, 0.0, alpha.clamp(0.0, 1.0));
     }
 }
@@ -845,7 +1041,9 @@ fn hud_tick_killlog(
         let d = entry.timer.duration().as_secs_f32().max(0.0001);
         let remain = (d - entry.timer.elapsed_secs()).max(0.0) / d;
         text.sections[0].style.color = Color::srgba(1.0, 1.0, 1.0, remain.clamp(0.0, 1.0));
-        if entry.timer.finished() { commands.entity(e).despawn_recursive(); }
+        if entry.timer.finished() {
+            commands.entity(e).despawn_recursive();
+        }
     }
 }
 
@@ -859,7 +1057,8 @@ fn add_mesh_colliders_for_map(
     let mut any_inserted = false;
     for (e, h) in &q {
         if let Some(mesh) = meshes.get(h) {
-            if let Some(collider) = Collider::from_bevy_mesh(mesh, &ComputedColliderShape::TriMesh) {
+            if let Some(collider) = Collider::from_bevy_mesh(mesh, &ComputedColliderShape::TriMesh)
+            {
                 commands.entity(e).insert((collider, RigidBody::Fixed));
                 any_inserted = true;
             }
@@ -872,7 +1071,9 @@ fn add_mesh_colliders_for_map(
 }
 
 #[derive(Resource, Default)]
-struct ConnStatePrev { connected: bool }
+struct ConnStatePrev {
+    connected: bool,
+}
 
 fn net_log_connection(mut prev: ResMut<ConnStatePrev>, mut client: ResMut<RenetClient>) {
     let is_conn = client.is_connected();
@@ -889,22 +1090,33 @@ fn net_log_connection(mut prev: ResMut<ConnStatePrev>, mut client: ResMut<RenetC
 // --- Networking (client) ---
 
 #[derive(Component)]
-struct RemoteAvatar { id: u64 }
+struct RemoteAvatar {
+    id: u64,
+}
 
 #[derive(Resource, Default)]
 struct RemoteMap(std::collections::HashMap<u64, Entity>);
 
 #[derive(Resource)]
-struct LocalNetInfo { id: u64 }
+struct LocalNetInfo {
+    id: u64,
+}
 
 #[derive(Resource, Default)]
 struct InputSeq(u32);
 
 #[derive(Resource, Default)]
-struct AuthoritativeSelf { pos: Option<Vec3>, yaw: Option<f32>, vy: Option<f32>, grounded: Option<bool> }
+struct AuthoritativeSelf {
+    pos: Option<Vec3>,
+    yaw: Option<f32>,
+    vy: Option<f32>,
+    grounded: Option<bool>,
+}
 
 #[derive(Resource)]
-struct LocalHealth { hp: u16 }
+struct LocalHealth {
+    hp: u16,
+}
 
 // 入力再適用のための最小バッファ/ACK（将来の拡張に備えた土台）
 #[derive(Resource, Default)]
@@ -918,7 +1130,6 @@ struct PredictionAccumulator {
 #[derive(Resource, Default)]
 struct PendingPredictionFrames(std::collections::VecDeque<InputFrame>);
 
-
 #[derive(Resource, Default)]
 struct LastConfirmedSeq(Option<u32>);
 
@@ -928,7 +1139,11 @@ struct LastSnapshotTick(Option<u32>);
 
 // リモートアバター補間用のサンプル
 #[derive(Clone, Copy)]
-struct RemoteSample { tick: u32, pos: Vec3, yaw: f32 }
+struct RemoteSample {
+    tick: u32,
+    pos: Vec3,
+    yaw: f32,
+}
 
 // エンティティIDごとのサンプル履歴
 #[derive(Resource, Default)]
@@ -946,7 +1161,9 @@ fn setup_net_client(mut commands: Commands) {
     let (client, transport, client_id) = new_client(None);
     commands.insert_resource(client);
     commands.insert_resource(transport);
-    commands.insert_resource(LocalNetInfo { id: client_id.raw() });
+    commands.insert_resource(LocalNetInfo {
+        id: client_id.raw(),
+    });
     commands.insert_resource(RemoteMap::default());
     commands.insert_resource(InputSeq::default());
     commands.insert_resource(PredictionAccumulator::default());
@@ -956,7 +1173,10 @@ fn setup_net_client(mut commands: Commands) {
     commands.insert_resource(ScoreData::default());
     commands.insert_resource(ScoreVisible::default());
     commands.insert_resource(RoundUi::default());
-    commands.insert_resource(LocalAmmo { ammo: 0, reloading: false });
+    commands.insert_resource(LocalAmmo {
+        ammo: 0,
+        reloading: false,
+    });
     commands.insert_resource(InputBuffer::default());
     commands.insert_resource(LastConfirmedSeq::default());
     commands.insert_resource(LastSnapshotTick::default());
@@ -979,34 +1199,56 @@ fn scaffold_input_system(
     mut client: ResMut<RenetClient>,
     mut ghost: ResMut<LocalGhostScaffold>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyQ) { return; }
+    if !keys.just_pressed(KeyCode::KeyQ) {
+        return;
+    }
 
     // 接続中はローカル生成せず、サーバへ生成要求のみ送る
     if client.is_connected() {
         // クライアント単体時と同じロジックでヒット点を出し、最終配置座標を送る
-        let cam_g = if let Ok(v) = cam_q.get_single() { v } else { return };
-        let player_ent = if let Ok(e) = player_q.get_single() { e } else { return };
+        let cam_g = if let Ok(v) = cam_q.get_single() {
+            v
+        } else {
+            return;
+        };
+        let player_ent = if let Ok(e) = player_q.get_single() {
+            e
+        } else {
+            return;
+        };
         let origin = cam_g.translation();
         let dir: Vec3 = cam_g.forward().into();
-        if dir.length_squared() < 1e-6 { return; }
+        if dir.length_squared() < 1e-6 {
+            return;
+        }
         let mut hit_pos = origin + dir * SCAFFOLD_RANGE;
         if let Some((_entity, toi)) = rapier.cast_ray(
             origin,
             dir,
             SCAFFOLD_RANGE,
             true,
-            QueryFilter::default().exclude_collider(player_ent).exclude_sensors(),
+            QueryFilter::default()
+                .exclude_collider(player_ent)
+                .exclude_sensors(),
         ) {
             hit_pos = origin + dir * toi;
         }
         let place_pos = hit_pos + Vec3::Y * (SCAFFOLD_SIZE.y * 0.5 + 0.01);
-        if let Ok(bytes) = bincode::serialize(&ClientMessage::PlaceScaffold { pos: [place_pos.x, place_pos.y, place_pos.z] }) {
+        if let Ok(bytes) = bincode::serialize(&ClientMessage::PlaceScaffold {
+            pos: [place_pos.x, place_pos.y, place_pos.z],
+        }) {
             let _ = client.send_message(CH_RELIABLE, bytes);
         }
         // 視覚フィードバック用のゴースト足場（コライダー無し）を即時表示
         // 既存のゴーストがあれば消す
-        if let Some(e) = ghost.0.take() { commands.entity(e).despawn_recursive(); }
-        let mesh = meshes.add(Cuboid::new(SCAFFOLD_SIZE.x, SCAFFOLD_SIZE.y, SCAFFOLD_SIZE.z));
+        if let Some(e) = ghost.0.take() {
+            commands.entity(e).despawn_recursive();
+        }
+        let mesh = meshes.add(Cuboid::new(
+            SCAFFOLD_SIZE.x,
+            SCAFFOLD_SIZE.y,
+            SCAFFOLD_SIZE.z,
+        ));
         let col = Color::srgba(0.2, 0.9, 1.0, 0.25);
         let mat = materials.add(StandardMaterial {
             base_color: col,
@@ -1015,15 +1257,30 @@ fn scaffold_input_system(
             unlit: true,
             ..default()
         });
-        let ent = commands.spawn((
-            PbrBundle { mesh, material: mat, transform: Transform::from_translation(place_pos), ..default() },
-            GhostScaffold,
-        )).id();
+        let ent = commands
+            .spawn((
+                PbrBundle {
+                    mesh,
+                    material: mat,
+                    transform: Transform::from_translation(place_pos),
+                    ..default()
+                },
+                GhostScaffold,
+            ))
+            .id();
         ghost.0 = Some(ent);
         return;
     }
-    let cam_g = if let Ok(v) = cam_q.get_single() { v } else { return };
-    let player_ent = if let Ok(e) = player_q.get_single() { e } else { return };
+    let cam_g = if let Ok(v) = cam_q.get_single() {
+        v
+    } else {
+        return;
+    };
+    let player_ent = if let Ok(e) = player_q.get_single() {
+        e
+    } else {
+        return;
+    };
 
     let origin = cam_g.translation();
     let dir: Vec3 = cam_g.forward().into();
@@ -1034,7 +1291,9 @@ fn scaffold_input_system(
         dir,
         SCAFFOLD_RANGE,
         true,
-        QueryFilter::default().exclude_collider(player_ent).exclude_sensors(),
+        QueryFilter::default()
+            .exclude_collider(player_ent)
+            .exclude_sensors(),
     ) {
         let _ = entity; // 現状は未使用
         hit_pos = origin + dir * toi;
@@ -1051,7 +1310,11 @@ fn scaffold_input_system(
         owned.0.remove(0);
     }
 
-    let mesh = meshes.add(Cuboid::new(SCAFFOLD_SIZE.x, SCAFFOLD_SIZE.y, SCAFFOLD_SIZE.z));
+    let mesh = meshes.add(Cuboid::new(
+        SCAFFOLD_SIZE.x,
+        SCAFFOLD_SIZE.y,
+        SCAFFOLD_SIZE.z,
+    ));
     let col = Color::srgba(0.2, 0.9, 1.0, 0.45);
     let mat = materials.add(StandardMaterial {
         base_color: col,
@@ -1069,8 +1332,16 @@ fn scaffold_input_system(
                 transform: Transform::from_translation(place_pos),
                 ..default()
             },
-            Scaffold { hp: SCAFFOLD_HP, life: Timer::from_seconds(SCAFFOLD_LIFETIME, TimerMode::Once), owner: local_id.id },
-            Collider::cuboid(SCAFFOLD_SIZE.x * 0.5, SCAFFOLD_SIZE.y * 0.5, SCAFFOLD_SIZE.z * 0.5),
+            Scaffold {
+                hp: SCAFFOLD_HP,
+                life: Timer::from_seconds(SCAFFOLD_LIFETIME, TimerMode::Once),
+                owner: local_id.id,
+            },
+            Collider::cuboid(
+                SCAFFOLD_SIZE.x * 0.5,
+                SCAFFOLD_SIZE.y * 0.5,
+                SCAFFOLD_SIZE.z * 0.5,
+            ),
             RigidBody::Fixed,
         ))
         .id();
@@ -1113,7 +1384,9 @@ fn fps_update_system(
     mut q: Query<&mut Text, With<UiFps>>,
 ) {
     timer.0.tick(time.delta());
-    if !timer.0.finished() { return; }
+    if !timer.0.finished() {
+        return;
+    }
 
     if let Ok(mut t) = q.get_single_mut() {
         if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
@@ -1143,8 +1416,16 @@ fn net_send_input(
     last_conf: Res<LastConfirmedSeq>,
     mut recent: ResMut<RecentLocalFires>,
 ) {
-    let cam = if let Ok(c) = cam_q.get_single() { c } else { return };
-    let cam_tf = if let Ok(t) = cam_tf_q.get_single() { t } else { return };
+    let cam = if let Ok(c) = cam_q.get_single() {
+        c
+    } else {
+        return;
+    };
+    let cam_tf = if let Ok(t) = cam_tf_q.get_single() {
+        t
+    } else {
+        return;
+    };
 
     accumulator.remaining += time.delta_seconds();
     if accumulator.remaining > PREDICTION_DT * 5.0 {
@@ -1152,15 +1433,26 @@ fn net_send_input(
     }
 
     let mut mv = [0.0f32, 0.0f32];
-    if keys.pressed(KeyCode::KeyW) { mv[1] -= 1.0; }
-    if keys.pressed(KeyCode::KeyS) { mv[1] += 1.0; }
-    if keys.pressed(KeyCode::KeyA) { mv[0] -= 1.0; }
-    if keys.pressed(KeyCode::KeyD) { mv[0] += 1.0; }
+    if keys.pressed(KeyCode::KeyW) {
+        mv[1] -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        mv[1] += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        mv[0] -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        mv[0] += 1.0;
+    }
 
     let fire_hold = buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::KeyF);
     let fire_trigger = buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF);
-    if keys.just_pressed(KeyCode::Space) { accumulator.pending_jump = true; }
-    let ads = buttons.pressed(MouseButton::Right);
+    if keys.just_pressed(KeyCode::Space) {
+        accumulator.pending_jump = true;
+    }
+    let ads_key = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let ads = buttons.pressed(MouseButton::Right) || ads_key;
 
     while accumulator.remaining >= PREDICTION_DT {
         accumulator.remaining -= PREDICTION_DT;
@@ -1183,12 +1475,18 @@ fn net_send_input(
         };
         buf.0.push_back(frame.clone());
         pending_frames.0.push_back(frame.clone());
-        if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) { let _ = client.send_message(CH_INPUT, bytes); }
+        if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) {
+            let _ = client.send_message(CH_INPUT, bytes);
+        }
     }
 
     if let Some(ack) = last_conf.0 {
         while let Some(front) = buf.0.front() {
-            if front.seq <= ack { buf.0.pop_front(); } else { break; }
+            if front.seq <= ack {
+                buf.0.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -1196,25 +1494,72 @@ fn net_send_input(
         let origin = cam_tf.translation();
         let dir: Vec3 = cam_tf.forward().into();
         if dir.length_squared() > 1e-6 {
-            if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire { origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] }) { let _ = client.send_message(CH_RELIABLE, bytes); }
+            if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire {
+                origin: [origin.x, origin.y, origin.z],
+                dir: [dir.x, dir.y, dir.z],
+            }) {
+                let _ = client.send_message(CH_RELIABLE, bytes);
+            }
             let col = Color::srgb(0.95, 0.9, 0.2);
             let mmesh = meshes.add(Cuboid::new(0.06, 0.06, 0.06));
-            let mmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
-            commands.spawn((PbrBundle { mesh: mmesh, material: mmat, transform: Transform::from_translation(origin), ..default() }, MuzzleFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
-            let seg = dir.normalize_or_zero() * 50.0; let len = seg.length();
+            let mmat = materials.add(StandardMaterial {
+                base_color: col,
+                emissive: col.into(),
+                unlit: true,
+                ..default()
+            });
+            commands.spawn((
+                PbrBundle {
+                    mesh: mmesh,
+                    material: mmat,
+                    transform: Transform::from_translation(origin),
+                    ..default()
+                },
+                MuzzleFx {
+                    timer: Timer::from_seconds(0.06, TimerMode::Once),
+                },
+            ));
+            let seg = dir.normalize_or_zero() * 50.0;
+            let len = seg.length();
             if len > 0.001 {
                 let tmesh = meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
-                let tmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
+                let tmat = materials.add(StandardMaterial {
+                    base_color: col,
+                    emissive: col.into(),
+                    unlit: true,
+                    ..default()
+                });
                 let rot = Quat::from_rotation_arc(Vec3::Z, seg.normalize());
                 let pos = origin + seg * 0.5;
-                commands.spawn((PbrBundle { mesh: tmesh, material: tmat, transform: Transform { translation: pos, rotation: rot, scale: Vec3::ONE }, ..default() }, TracerFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
+                commands.spawn((
+                    PbrBundle {
+                        mesh: tmesh,
+                        material: tmat,
+                        transform: Transform {
+                            translation: pos,
+                            rotation: rot,
+                            scale: Vec3::ONE,
+                        },
+                        ..default()
+                    },
+                    TracerFx {
+                        timer: Timer::from_seconds(0.06, TimerMode::Once),
+                    },
+                ));
             }
-            recent.0.push_back((time.elapsed_seconds(), origin, dir.normalize_or_zero()));
-            while let Some(&(t, _, _)) = recent.0.front() { if time.elapsed_seconds() - t > 0.4 { recent.0.pop_front(); } else { break; } }
+            recent
+                .0
+                .push_back((time.elapsed_seconds(), origin, dir.normalize_or_zero()));
+            while let Some(&(t, _, _)) = recent.0.front() {
+                if time.elapsed_seconds() - t > 0.4 {
+                    recent.0.pop_front();
+                } else {
+                    break;
+                }
+            }
         }
     }
 }
-
 
 fn net_recv_snapshot(
     mut commands: Commands,
@@ -1235,17 +1580,26 @@ fn net_recv_snapshot(
             if matches!(
                 std::env::var("NET_SNAPSHOT_LOG").ok().as_deref(),
                 Some("1" | "true" | "TRUE")
-            ) && snap.players.len() > 0 {
+            ) && snap.players.len() > 0
+            {
                 info!("client: snapshot players={}", snap.players.len());
             }
             // 入力ACK: このクライアントの直近確定seqを拾い、未確定バッファの整理に使う
-            if let Some((_id, seq)) = snap.acks.iter().find(|(id, _)| *id == local.id) { last_conf.0 = Some(*seq); }
+            if let Some((_id, seq)) = snap.acks.iter().find(|(id, _)| *id == local.id) {
+                last_conf.0 = Some(*seq);
+            }
             // 古いスナップは破棄（tick単調増加を前提）
-            if let Some(prev) = last_tick.0 { if snap.tick <= prev { continue; } }
+            if let Some(prev) = last_tick.0 {
+                if snap.tick <= prev {
+                    continue;
+                }
+            }
             last_tick.0 = Some(snap.tick);
             for p in snap.players {
                 kinds.0.insert(p.id, p.kind);
-                positions.0.insert(p.id, Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
+                positions
+                    .0
+                    .insert(p.id, Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
                 if p.id == local.id {
                     self_auth.pos = Some(Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
                     self_auth.yaw = Some(p.yaw);
@@ -1256,20 +1610,42 @@ fn net_recv_snapshot(
                 let pos = Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
                 if p.alive {
                     // 補間用履歴に push（後段の補間システムが使用）
-                    let entry = rhist.0.entry(p.id).or_insert_with(|| std::collections::VecDeque::with_capacity(16));
-                    entry.push_back(RemoteSample { tick: last_tick.0.unwrap_or(0), pos, yaw: p.yaw });
-                    while entry.len() > 16 { entry.pop_front(); }
+                    let entry = rhist
+                        .0
+                        .entry(p.id)
+                        .or_insert_with(|| std::collections::VecDeque::with_capacity(16));
+                    entry.push_back(RemoteSample {
+                        tick: last_tick.0.unwrap_or(0),
+                        pos,
+                        yaw: p.yaw,
+                    });
+                    while entry.len() > 16 {
+                        entry.pop_front();
+                    }
                     if let Some(&ent) = remap.0.get(&p.id) {
                         if let Some(mut ec) = commands.get_entity(ent) {
-                            ec.insert(Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(p.yaw)));
+                            ec.insert(
+                                Transform::from_translation(pos)
+                                    .with_rotation(Quat::from_rotation_y(p.yaw)),
+                            );
                         }
                     } else {
                         let mesh = meshes.add(Cuboid::new(0.4, 1.8, 0.4));
-                        let mat = materials.add(match p.kind { ActorKind::Human => Color::srgb(0.2, 0.9, 0.3), ActorKind::Bot => Color::srgb(0.9, 0.2, 0.2) });
-                        let ent = commands.spawn((
-                            PbrBundle { mesh, material: mat, transform: Transform::from_translation(pos), ..default() },
-                            RemoteAvatar { id: p.id },
-                        )).id();
+                        let mat = materials.add(match p.kind {
+                            ActorKind::Human => Color::srgb(0.2, 0.9, 0.3),
+                            ActorKind::Bot => Color::srgb(0.9, 0.2, 0.2),
+                        });
+                        let ent = commands
+                            .spawn((
+                                PbrBundle {
+                                    mesh,
+                                    material: mat,
+                                    transform: Transform::from_translation(pos),
+                                    ..default()
+                                },
+                                RemoteAvatar { id: p.id },
+                            ))
+                            .id();
                         remap.0.insert(p.id, ent);
                     }
                 } else {
@@ -1289,23 +1665,38 @@ fn remote_interpolate_system(
     delay: Res<InterpDelayTicks>,
     last_tick: Res<LastSnapshotTick>,
     mut q_tf: Query<&mut Transform>,
-){
+) {
     let Some(latest) = last_tick.0 else { return };
     let target_tick = latest.saturating_sub(delay.0);
     for (id, ent) in remap.0.iter() {
-        let Some(hist) = rhist.0.get(id) else { continue };
-        if hist.is_empty() { continue; }
+        let Some(hist) = rhist.0.get(id) else {
+            continue;
+        };
+        if hist.is_empty() {
+            continue;
+        }
         let mut a = hist.front().copied().unwrap();
         let mut b = hist.back().copied().unwrap();
-        if target_tick <= a.tick { b = a; }
-        else if target_tick >= b.tick { a = b; }
-        else {
+        if target_tick <= a.tick {
+            b = a;
+        } else if target_tick >= b.tick {
+            a = b;
+        } else {
             for w in hist.as_slices().0.windows(2) {
-                let x = w[0]; let y = w[1];
-                if x.tick <= target_tick && target_tick <= y.tick { a = x; b = y; break; }
+                let x = w[0];
+                let y = w[1];
+                if x.tick <= target_tick && target_tick <= y.tick {
+                    a = x;
+                    b = y;
+                    break;
+                }
             }
         }
-        let t = if b.tick > a.tick { (target_tick - a.tick) as f32 / (b.tick - a.tick) as f32 } else { 0.0 };
+        let t = if b.tick > a.tick {
+            (target_tick - a.tick) as f32 / (b.tick - a.tick) as f32
+        } else {
+            0.0
+        };
         let pos = a.pos.lerp(b.pos, t.clamp(0.0, 1.0));
         let dy = wrap_pi(b.yaw - a.yaw);
         let yaw = wrap_pi(a.yaw + dy * t.clamp(0.0, 1.0));
@@ -1339,158 +1730,317 @@ fn net_recv_events(
             match msg {
                 ServerMessage::Event(ev) => match ev {
                     EventMsg::Spawn { id, pos, kind } => {
-                    let p = Vec3::new(pos[0], pos[1], pos[2]);
-                    kinds.0.insert(id, kind);
-                    if id == local.id {
-                        self_auth.pos = Some(p);
-                        my_hp.hp = 100;
-                        // Teleport local player to server spawn to avoid later corrections.
-                        if let Ok((mut tf, mut ctrl)) = player_q.get_single_mut() {
-                            tf.translation = p;
-                            ctrl.vy = 0.0; ctrl.on_ground = true; ctrl.jumps = 0;
-                        }
-                    } else {
-                        if let Some(&ent) = remap.0.get(&id) {
-                            if let Some(mut ec) = commands.get_entity(ent) {
-                                ec.insert(Transform::from_translation(p));
+                        let p = Vec3::new(pos[0], pos[1], pos[2]);
+                        kinds.0.insert(id, kind);
+                        if id == local.id {
+                            self_auth.pos = Some(p);
+                            my_hp.hp = 100;
+                            // Teleport local player to server spawn to avoid later corrections.
+                            if let Ok((mut tf, mut ctrl)) = player_q.get_single_mut() {
+                                tf.translation = p;
+                                ctrl.vy = 0.0;
+                                ctrl.on_ground = true;
+                                ctrl.jumps = 0;
                             }
                         } else {
-                            let mesh = sc_assets.meshes.add(Cuboid::new(0.4, 1.8, 0.4));
-                            let mat = sc_assets.materials.add(match kind { ActorKind::Human => Color::srgb(0.2, 0.9, 0.3), ActorKind::Bot => Color::srgb(0.9, 0.2, 0.2) });
-                            let ent = commands.spawn((PbrBundle { mesh, material: mat, transform: Transform::from_translation(p), ..default() }, RemoteAvatar { id })).id();
-                            remap.0.insert(id, ent);
+                            if let Some(&ent) = remap.0.get(&id) {
+                                if let Some(mut ec) = commands.get_entity(ent) {
+                                    ec.insert(Transform::from_translation(p));
+                                }
+                            } else {
+                                let mesh = sc_assets.meshes.add(Cuboid::new(0.4, 1.8, 0.4));
+                                let mat = sc_assets.materials.add(match kind {
+                                    ActorKind::Human => Color::srgb(0.2, 0.9, 0.3),
+                                    ActorKind::Bot => Color::srgb(0.9, 0.2, 0.2),
+                                });
+                                let ent = commands
+                                    .spawn((
+                                        PbrBundle {
+                                            mesh,
+                                            material: mat,
+                                            transform: Transform::from_translation(p),
+                                            ..default()
+                                        },
+                                        RemoteAvatar { id },
+                                    ))
+                                    .id();
+                                remap.0.insert(id, ent);
+                            }
                         }
                     }
-                }
-                EventMsg::Despawn { id } => {
-                    if let Some(ent) = remap.0.remove(&id) { commands.entity(ent).despawn_recursive(); }
-                }
-                EventMsg::Hit { target_id, new_hp, by } => {
-                    if target_id == local.id { my_hp.hp = new_hp; }
-                    if by == local.id {
-                        if let Ok(mut hm) = hit_q.get_single_mut() {
-                            hm.timer.set_duration(Duration::from_secs_f32(0.15));
-                            hm.timer.reset();
+                    EventMsg::Despawn { id } => {
+                        if let Some(ent) = remap.0.remove(&id) {
+                            commands.entity(ent).despawn_recursive();
                         }
                     }
-                    if target_id == local.id {
-                        // Add damage vignette overlay
+                    EventMsg::Hit {
+                        target_id,
+                        new_hp,
+                        by,
+                    } => {
+                        if target_id == local.id {
+                            my_hp.hp = new_hp;
+                        }
+                        if by == local.id {
+                            if let Ok(mut hm) = hit_q.get_single_mut() {
+                                hm.timer.set_duration(Duration::from_secs_f32(0.15));
+                                hm.timer.reset();
+                            }
+                        }
+                        if target_id == local.id {
+                            // Add damage vignette overlay
+                            commands.spawn((
+                                NodeBundle {
+                                    style: Style {
+                                        position_type: PositionType::Absolute,
+                                        width: Val::Percent(100.0),
+                                        height: Val::Percent(100.0),
+                                        ..default()
+                                    },
+                                    background_color: BackgroundColor(Color::rgba(
+                                        0.8, 0.0, 0.0, 0.35,
+                                    )),
+                                    ..default()
+                                },
+                                UiDamageVignette {
+                                    timer: Timer::from_seconds(0.4, TimerMode::Once),
+                                },
+                            ));
+                        }
+                    }
+                    EventMsg::Death { target_id, by } => {
+                        if target_id == local.id {
+                            my_hp.hp = 0;
+                        }
+                        if let Some(ent) = remap.0.remove(&target_id) {
+                            commands.entity(ent).despawn_recursive();
+                        }
+                        // キルログ追加
+                        let killer = if by == local.id {
+                            "You".to_string()
+                        } else {
+                            format!("{}", by)
+                        };
+                        let victim = if target_id == local.id {
+                            "You".to_string()
+                        } else {
+                            format!("{}", target_id)
+                        };
+                        let line = format!("{} -> {}", killer, victim);
+                        if let Ok(root) = log_root_q.get_single() {
+                            commands.entity(root).with_children(|p| {
+                                p.spawn((
+                                    TextBundle::from_section(
+                                        line,
+                                        TextStyle {
+                                            font_size: 24.0,
+                                            color: Color::BLACK,
+                                            ..default()
+                                        },
+                                    ),
+                                    UiKillEntry {
+                                        timer: Timer::from_seconds(3.0, TimerMode::Once),
+                                    },
+                                ));
+                            });
+                        }
+                    }
+                    EventMsg::Fire {
+                        id,
+                        origin,
+                        dir,
+                        hit,
+                    } => {
+                        // 自分の発砲はローカル即時VFXを出しているため、サーバVFXは重複回避
+                        if id == local.id {
+                            continue;
+                        }
+                        // VFX: muzzle + tracer (+ impact)
+                        let o = Vec3::new(origin[0], origin[1], origin[2]);
+                        let d = Vec3::new(dir[0], dir[1], dir[2]).normalize_or_zero();
+                        let end = match hit {
+                            Some(h) => Vec3::new(h[0], h[1], h[2]),
+                            None => o + d * 50.0,
+                        };
+                        let col = match kinds.0.get(&id).copied() {
+                            Some(ActorKind::Bot) => Color::srgb(0.95, 0.25, 0.2),
+                            _ => Color::srgb(0.95, 0.9, 0.2),
+                        };
+                        // muzzle
+                        let mmesh = sc_assets.meshes.add(Cuboid::new(0.06, 0.06, 0.06));
+                        let mmat = sc_assets.materials.add(StandardMaterial {
+                            base_color: col,
+                            emissive: col.into(),
+                            unlit: true,
+                            ..default()
+                        });
                         commands.spawn((
-                            NodeBundle {
-                                style: Style { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
-                                background_color: BackgroundColor(Color::rgba(0.8, 0.0, 0.0, 0.35)),
+                            PbrBundle {
+                                mesh: mmesh,
+                                material: mmat,
+                                transform: Transform::from_translation(o),
                                 ..default()
                             },
-                            UiDamageVignette { timer: Timer::from_seconds(0.4, TimerMode::Once) },
+                            MuzzleFx {
+                                timer: Timer::from_seconds(0.06, TimerMode::Once),
+                            },
                         ));
-                    }
-                }
-                EventMsg::Death { target_id, by } => {
-                    if target_id == local.id { my_hp.hp = 0; }
-                    if let Some(ent) = remap.0.remove(&target_id) { commands.entity(ent).despawn_recursive(); }
-                    // キルログ追加
-                    let killer = if by == local.id { "You".to_string() } else { format!("{}", by) };
-                    let victim = if target_id == local.id { "You".to_string() } else { format!("{}", target_id) };
-                    let line = format!("{} -> {}", killer, victim);
-                    if let Ok(root) = log_root_q.get_single() {
-                        commands.entity(root).with_children(|p| {
-                            p.spawn((
-                                TextBundle::from_section(
-                                    line,
-                                    TextStyle { font_size: 24.0, color: Color::BLACK, ..default() },
-                                ),
-                                UiKillEntry { timer: Timer::from_seconds(3.0, TimerMode::Once) },
+                        // tracer
+                        let seg = end - o;
+                        let len = seg.length();
+                        if len > 0.001 {
+                            let tmesh =
+                                sc_assets.meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
+                            let tmat = sc_assets.materials.add(StandardMaterial {
+                                base_color: col,
+                                emissive: col.into(),
+                                unlit: true,
+                                ..default()
+                            });
+                            let rot = Quat::from_rotation_arc(Vec3::Z, seg.normalize());
+                            let pos = o + seg * 0.5;
+                            commands.spawn((
+                                PbrBundle {
+                                    mesh: tmesh,
+                                    material: tmat,
+                                    transform: Transform {
+                                        translation: pos,
+                                        rotation: rot,
+                                        scale: Vec3::ONE,
+                                    },
+                                    ..default()
+                                },
+                                TracerFx {
+                                    timer: Timer::from_seconds(0.06, TimerMode::Once),
+                                },
                             ));
+                        }
+                        // impact
+                        if let Some(h) = hit {
+                            let hp = Vec3::new(h[0], h[1], h[2]);
+                            let imesh = sc_assets.meshes.add(Cuboid::new(0.05, 0.05, 0.02));
+                            let imat = sc_assets.materials.add(StandardMaterial {
+                                base_color: Color::srgb(1.0, 0.6, 0.3),
+                                emissive: Color::srgb(1.0, 0.6, 0.3).into(),
+                                unlit: true,
+                                ..default()
+                            });
+                            commands.spawn((
+                                PbrBundle {
+                                    mesh: imesh,
+                                    material: imat,
+                                    transform: Transform::from_translation(hp),
+                                    ..default()
+                                },
+                                ImpactFx {
+                                    timer: Timer::from_seconds(0.2, TimerMode::Once),
+                                },
+                            ));
+                        }
+                    }
+                    EventMsg::RoundStart { time_left_sec } => {
+                        round_ui.phase_end = None;
+                        round_ui.time_left = time_left_sec as f32;
+                        round_ui.winner = None;
+                    }
+                    EventMsg::RoundEnd {
+                        winner_id,
+                        next_in_sec,
+                    } => {
+                        round_ui.winner = winner_id;
+                        round_ui.phase_end =
+                            Some(Timer::from_seconds(next_in_sec as f32, TimerMode::Once));
+                    }
+                    EventMsg::Ammo {
+                        id,
+                        ammo,
+                        reloading,
+                    } => {
+                        if id == local.id {
+                            local_ammo.ammo = ammo;
+                            local_ammo.reloading = reloading;
+                        }
+                    }
+                    EventMsg::ScaffoldSpawn {
+                        sid,
+                        owner: owner_id,
+                        pos,
+                    } => {
+                        let p = Vec3::new(pos[0], pos[1], pos[2]);
+                        let mesh = sc_assets.meshes.add(Cuboid::new(
+                            SCAFFOLD_SIZE.x,
+                            SCAFFOLD_SIZE.y,
+                            SCAFFOLD_SIZE.z,
+                        ));
+                        let col = Color::srgba(0.2, 0.9, 1.0, 0.45);
+                        let mat = sc_assets.materials.add(StandardMaterial {
+                            base_color: col,
+                            emissive: Color::srgb(0.3, 0.8, 1.0).into(),
+                            alpha_mode: AlphaMode::Blend,
+                            unlit: true,
+                            ..default()
                         });
+                        let ent = commands
+                            .spawn((
+                                PbrBundle {
+                                    mesh,
+                                    material: mat,
+                                    transform: Transform::from_translation(p),
+                                    ..default()
+                                },
+                                NetScaffold { sid },
+                                Collider::cuboid(
+                                    SCAFFOLD_SIZE.x * 0.5,
+                                    SCAFFOLD_SIZE.y * 0.5,
+                                    SCAFFOLD_SIZE.z * 0.5,
+                                ),
+                                RigidBody::Fixed,
+                            ))
+                            .id();
+                        sc_assets.map.0.insert(sid, ent);
+                        // 自分が要求した場合はゴーストを除去
+                        if owner_id == local.id {
+                            if let Some(e) = ghost.0.take() {
+                                commands.entity(e).despawn_recursive();
+                            }
+                        }
                     }
-                }
-                EventMsg::Fire { id, origin, dir, hit } => {
-                    // 自分の発砲はローカル即時VFXを出しているため、サーバVFXは重複回避
-                    if id == local.id { continue; }
-                    // VFX: muzzle + tracer (+ impact)
-                    let o = Vec3::new(origin[0], origin[1], origin[2]);
-                    let d = Vec3::new(dir[0], dir[1], dir[2]).normalize_or_zero();
-                    let end = match hit { Some(h) => Vec3::new(h[0], h[1], h[2]), None => o + d * 50.0 };
-                    let col = match kinds.0.get(&id).copied() { Some(ActorKind::Bot) => Color::srgb(0.95, 0.25, 0.2), _ => Color::srgb(0.95, 0.9, 0.2) };
-                    // muzzle
-                    let mmesh = sc_assets.meshes.add(Cuboid::new(0.06, 0.06, 0.06));
-                    let mmat = sc_assets.materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
-                    commands.spawn((PbrBundle { mesh: mmesh, material: mmat, transform: Transform::from_translation(o), ..default() }, MuzzleFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
-                    // tracer
-                    let seg = end - o; let len = seg.length();
-                    if len > 0.001 {
-                        let tmesh = sc_assets.meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
-                        let tmat = sc_assets.materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
-                        let rot = Quat::from_rotation_arc(Vec3::Z, seg.normalize());
-                        let pos = o + seg * 0.5;
-                        commands.spawn((PbrBundle { mesh: tmesh, material: tmat, transform: Transform { translation: pos, rotation: rot, scale: Vec3::ONE }, ..default() }, TracerFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
+                    EventMsg::ScaffoldDespawn { sid } => {
+                        if let Some(ent) = sc_assets.map.0.remove(&sid) {
+                            commands.entity(ent).despawn_recursive();
+                        }
                     }
-                    // impact
-                    if let Some(h) = hit { let hp = Vec3::new(h[0], h[1], h[2]); let imesh = sc_assets.meshes.add(Cuboid::new(0.05, 0.05, 0.02)); let imat = sc_assets.materials.add(StandardMaterial { base_color: Color::srgb(1.0, 0.6, 0.3), emissive: Color::srgb(1.0, 0.6, 0.3).into(), unlit: true, ..default() }); commands.spawn((PbrBundle { mesh: imesh, material: imat, transform: Transform::from_translation(hp), ..default() }, ImpactFx { timer: Timer::from_seconds(0.2, TimerMode::Once) })); }
-                }
-                EventMsg::RoundStart { time_left_sec } => {
-                    round_ui.phase_end = None;
-                    round_ui.time_left = time_left_sec as f32;
-                    round_ui.winner = None;
-                }
-                EventMsg::RoundEnd { winner_id, next_in_sec } => {
-                    round_ui.winner = winner_id;
-                    round_ui.phase_end = Some(Timer::from_seconds(next_in_sec as f32, TimerMode::Once));
-                }
-                EventMsg::Ammo { id, ammo, reloading } => {
-                    if id == local.id {
-                        local_ammo.ammo = ammo;
-                        local_ammo.reloading = reloading;
-                    }
-                }
-                EventMsg::ScaffoldSpawn { sid, owner: owner_id, pos } => {
-                    let p = Vec3::new(pos[0], pos[1], pos[2]);
-                    let mesh = sc_assets.meshes.add(Cuboid::new(SCAFFOLD_SIZE.x, SCAFFOLD_SIZE.y, SCAFFOLD_SIZE.z));
-                    let col = Color::srgba(0.2, 0.9, 1.0, 0.45);
-                    let mat = sc_assets.materials.add(StandardMaterial {
-                        base_color: col,
-                        emissive: Color::srgb(0.3, 0.8, 1.0).into(),
-                        alpha_mode: AlphaMode::Blend,
-                        unlit: true,
-                        ..default()
-                    });
-                    let ent = commands
-                        .spawn((
-                            PbrBundle { mesh, material: mat, transform: Transform::from_translation(p), ..default() },
-                            NetScaffold { sid },
-                            Collider::cuboid(SCAFFOLD_SIZE.x * 0.5, SCAFFOLD_SIZE.y * 0.5, SCAFFOLD_SIZE.z * 0.5),
-                            RigidBody::Fixed,
-                        ))
-                        .id();
-                    sc_assets.map.0.insert(sid, ent);
-                    // 自分が要求した場合はゴーストを除去
-                    if owner_id == local.id {
-                        if let Some(e) = ghost.0.take() { commands.entity(e).despawn_recursive(); }
-                    }
-                }
-                EventMsg::ScaffoldDespawn { sid } => {
-                    if let Some(ent) = sc_assets.map.0.remove(&sid) {
-                        commands.entity(ent).despawn_recursive();
-                    }
-                }
-            },
+                },
                 ServerMessage::Score(entries) => {
                     // 更新して、スコアボードUIを再構築
-                    score_data.0 = entries.into_iter().map(|e| (e.id, e.kills, e.deaths)).collect();
+                    score_data.0 = entries
+                        .into_iter()
+                        .map(|e| (e.id, e.kills, e.deaths))
+                        .collect();
                     if let Ok(root) = board_root_q.get_single() {
-                        if let Some(mut ec) = commands.get_entity(root) { ec.despawn_descendants(); }
+                        if let Some(mut ec) = commands.get_entity(root) {
+                            ec.despawn_descendants();
+                        }
                         commands.entity(root).with_children(|p| {
-                    p.spawn(TextBundle::from_section(
-                        format!("{:>6}  {:>5} {:>6}", "ID", "K", "D"),
-                        TextStyle { font_size: 28.0, color: Color::BLACK, ..default() },
-                    ));
+                            p.spawn(TextBundle::from_section(
+                                format!("{:>6}  {:>5} {:>6}", "ID", "K", "D"),
+                                TextStyle {
+                                    font_size: 28.0,
+                                    color: Color::BLACK,
+                                    ..default()
+                                },
+                            ));
                             let mut rows = score_data.0.clone();
                             rows.sort_by_key(|e| (-(e.1 as i32), e.2 as i32));
                             for (id, k, d) in rows {
-                        p.spawn(TextBundle::from_section(
-                            format!("{:>6}  {:>5} {:>6}", id, k, d),
-                            TextStyle { font_size: 24.0, color: Color::BLACK, ..default() },
-                        ));
+                                p.spawn(TextBundle::from_section(
+                                    format!("{:>6}  {:>5} {:>6}", id, k, d),
+                                    TextStyle {
+                                        font_size: 24.0,
+                                        color: Color::BLACK,
+                                        ..default()
+                                    },
+                                ));
                             }
                         });
                     }
@@ -1511,13 +2061,23 @@ fn predict_position_from_inputs(
     let mut pos = base;
     let mut jump_buf = 0.0f32;
     let mut jump_cd = 0.0f32;
-    let mut coyote = if grounded { shared_consts::COYOTE_SEC } else { 0.0 };
+    let mut coyote = if grounded {
+        shared_consts::COYOTE_SEC
+    } else {
+        0.0
+    };
     let mut used_jumps: u8 = if grounded { 0 } else { 1 };
 
     for frame in inputs {
-        if frame.jump { jump_buf = shared_consts::JUMP_BUFFER_SEC; }
-        if jump_buf > 0.0 { jump_buf = (jump_buf - frame.dt).max(0.0); }
-        if jump_cd > 0.0 { jump_cd = (jump_cd - frame.dt).max(0.0); }
+        if frame.jump {
+            jump_buf = shared_consts::JUMP_BUFFER_SEC;
+        }
+        if jump_buf > 0.0 {
+            jump_buf = (jump_buf - frame.dt).max(0.0);
+        }
+        if jump_cd > 0.0 {
+            jump_cd = (jump_cd - frame.dt).max(0.0);
+        }
         if grounded {
             coyote = shared_consts::COYOTE_SEC;
             used_jumps = 0;
@@ -1550,11 +2110,17 @@ fn predict_position_from_inputs(
             horiz = (yaw_rot * input).normalize();
         }
         let mut speed = MOVE_SPEED;
-        if frame.ads { speed *= shared_consts::ADS_SPEED_MUL; }
+        if frame.ads {
+            speed *= shared_consts::ADS_SPEED_MUL;
+        }
         pos += horiz * speed * frame.dt + Vec3::Y * vy * frame.dt;
 
-        if jumped { grounded = false; }
-        if vy <= 0.0 { grounded = false; }
+        if jumped {
+            grounded = false;
+        }
+        if vy <= 0.0 {
+            grounded = false;
+        }
     }
 
     pos
@@ -1568,8 +2134,17 @@ fn reconcile_self(
     buf: Res<InputBuffer>,
 ) {
     // Default: enable light position reconciliation. Set RECONCILE_POS=0 to disable.
-    if matches!(std::env::var("RECONCILE_POS").ok().as_deref(), Some("0" | "false" | "FALSE")) { return; }
-    let mut tf = if let Ok(t) = q.get_single_mut() { t } else { return };
+    if matches!(
+        std::env::var("RECONCILE_POS").ok().as_deref(),
+        Some("0" | "false" | "FALSE")
+    ) {
+        return;
+    }
+    let mut tf = if let Ok(t) = q.get_single_mut() {
+        t
+    } else {
+        return;
+    };
     if let Some(base) = self_auth.pos {
         // 未確定入力を再適用した予測ターゲットを作る（簡易）
         let mut target = base;
@@ -1584,7 +2159,9 @@ fn reconcile_self(
         let diff = target - tf.translation;
         let d = diff.length();
         // Deadband: ignore tiny differences to avoid visible jitter.
-        if d <= POS_DEADBAND { return; }
+        if d <= POS_DEADBAND {
+            return;
+        }
         // Snap when far out-of-bounds to recover quickly.
         // ただし Transform を直接書き換えず、KCC に追加移動として与え、衝突解決に任せる。
         if let Ok(mut kcc) = qk.get_single_mut() {
@@ -1592,7 +2169,9 @@ fn reconcile_self(
             if d >= POS_SNAP {
                 // 空中ではY補正を入れない（落下中のがくつきを防止）
                 let mut corr = diff;
-                if !grounded { corr.y = 0.0; }
+                if !grounded {
+                    corr.y = 0.0;
+                }
                 kcc.translation = Some(kcc.translation.unwrap_or(Vec3::ZERO) + corr);
                 return;
             }
@@ -1600,62 +2179,76 @@ fn reconcile_self(
             let rate = 6.0; // per second (gentle correction to avoid warps)
             let step = (rate * time.delta_seconds()).min(1.0);
             let mut corr = diff * step;
-            if !grounded { corr.y = 0.0; }
+            if !grounded {
+                corr.y = 0.0;
+            }
             kcc.translation = Some(kcc.translation.unwrap_or(Vec3::ZERO) + corr);
         }
     }
-    if matches!(std::env::var("RECONCILE_YAW").ok().as_deref(), Some("1" | "true" | "TRUE")) { if let Some(yaw) = self_auth.yaw {
-        // 軽い追従のみ（強いワープは避ける）
-        let current_yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
-        let delta = wrap_pi(yaw - current_yaw);
-        let step = (6.0 * time.delta_seconds()).min(1.0);
-        tf.rotation = Quat::from_rotation_y(wrap_pi(current_yaw + delta * step));
-    }
-}
-
-// 入力ACKを基点に、未確定入力を簡易再適用して視覚的な差し戻しを低減
-fn replay_unconfirmed_inputs(
-    self_auth: Res<AuthoritativeSelf>,
-    buf: Res<InputBuffer>,
-    mut q: Query<(&mut Transform, &mut Controller), With<Player>>,
-) {
-    if buf.0.is_empty() { return; }
-    let Some(base) = self_auth.pos else { return };
-    let Ok((mut tf, mut ctrl)) = q.get_single_mut() else { return };
-    // ベースをサーバ確定位置に置き、簡易再シム（衝突は考慮しない）
-    let mut pos = base;
-    let mut vy = 0.0f32;
-    let mut used_jumps: u8 = 0;
-    for f in buf.0.iter() {
-        let mut horiz = Vec3::ZERO;
-        let input = Vec3::new(f.mv[0], 0.0, f.mv[1]);
-        if input.length_squared() > 1e-6 {
-            let yaw_rot = Quat::from_rotation_y(f.yaw);
-            horiz = (yaw_rot * input).normalize();
+    if matches!(
+        std::env::var("RECONCILE_YAW").ok().as_deref(),
+        Some("1" | "true" | "TRUE")
+    ) {
+        if let Some(yaw) = self_auth.yaw {
+            // 軽い追従のみ（強いワープは避ける）
+            let current_yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
+            let delta = wrap_pi(yaw - current_yaw);
+            let step = (6.0 * time.delta_seconds()).min(1.0);
+            tf.rotation = Quat::from_rotation_y(wrap_pi(current_yaw + delta * step));
         }
-        let mut speed = MOVE_SPEED;
-        // jump
-        if f.jump && (used_jumps == 0) { vy = shared_consts::JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
-        // integrate
-        vy -= shared_consts::GRAVITY * f.dt;
-        pos += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
     }
-    tf.translation = pos;
-    ctrl.vy = vy; // 目安として反映
-}
 
-fn scoreboard_toggle(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut q: Query<&mut Visibility, With<UiScoreboard>>,
-) {
-    if keys.just_pressed(KeyCode::Tab) {
-        if let Ok(mut v) = q.get_single_mut() {
-            *v = match *v {
-                Visibility::Hidden => Visibility::Visible,
-                _ => Visibility::Hidden,
-            };
+    // 入力ACKを基点に、未確定入力を簡易再適用して視覚的な差し戻しを低減
+    fn replay_unconfirmed_inputs(
+        self_auth: Res<AuthoritativeSelf>,
+        buf: Res<InputBuffer>,
+        mut q: Query<(&mut Transform, &mut Controller), With<Player>>,
+    ) {
+        if buf.0.is_empty() {
+            return;
         }
-    } }
+        let Some(base) = self_auth.pos else { return };
+        let Ok((mut tf, mut ctrl)) = q.get_single_mut() else {
+            return;
+        };
+        // ベースをサーバ確定位置に置き、簡易再シム（衝突は考慮しない）
+        let mut pos = base;
+        let mut vy = 0.0f32;
+        let mut used_jumps: u8 = 0;
+        for f in buf.0.iter() {
+            let mut horiz = Vec3::ZERO;
+            let input = Vec3::new(f.mv[0], 0.0, f.mv[1]);
+            if input.length_squared() > 1e-6 {
+                let yaw_rot = Quat::from_rotation_y(f.yaw);
+                horiz = (yaw_rot * input).normalize();
+            }
+            let mut speed = MOVE_SPEED;
+            // jump
+            if f.jump && (used_jumps == 0) {
+                vy = shared_consts::JUMP_SPEED;
+                used_jumps = used_jumps.saturating_add(1);
+            }
+            // integrate
+            vy -= shared_consts::GRAVITY * f.dt;
+            pos += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
+        }
+        tf.translation = pos;
+        ctrl.vy = vy; // 目安として反映
+    }
+
+    fn scoreboard_toggle(
+        keys: Res<ButtonInput<KeyCode>>,
+        mut q: Query<&mut Visibility, With<UiScoreboard>>,
+    ) {
+        if keys.just_pressed(KeyCode::Tab) {
+            if let Ok(mut v) = q.get_single_mut() {
+                *v = match *v {
+                    Visibility::Hidden => Visibility::Visible,
+                    _ => Visibility::Hidden,
+                };
+            }
+        }
+    }
 }
 
 // --- VFX tickers ---
@@ -1668,26 +2261,52 @@ fn vfx_tick_and_cleanup(
     mut q_vign: Query<(Entity, &mut UiDamageVignette)>,
     mut bg_colors: Query<&mut BackgroundColor>,
 ) {
-    for (e, mut fx) in &mut q_muzzle { fx.timer.tick(time.delta()); if fx.timer.finished() { commands.entity(e).despawn_recursive(); } }
-    for (e, mut fx) in &mut q_tracer { fx.timer.tick(time.delta()); if fx.timer.finished() { commands.entity(e).despawn_recursive(); } }
-    for (e, mut fx) in &mut q_impact { fx.timer.tick(time.delta()); if fx.timer.finished() { commands.entity(e).despawn_recursive(); } }
+    for (e, mut fx) in &mut q_muzzle {
+        fx.timer.tick(time.delta());
+        if fx.timer.finished() {
+            commands.entity(e).despawn_recursive();
+        }
+    }
+    for (e, mut fx) in &mut q_tracer {
+        fx.timer.tick(time.delta());
+        if fx.timer.finished() {
+            commands.entity(e).despawn_recursive();
+        }
+    }
+    for (e, mut fx) in &mut q_impact {
+        fx.timer.tick(time.delta());
+        if fx.timer.finished() {
+            commands.entity(e).despawn_recursive();
+        }
+    }
     for (e, mut v) in &mut q_vign {
         v.timer.tick(time.delta());
         if let Ok(mut col) = bg_colors.get_mut(e) {
-            let t = (1.0 - (v.timer.elapsed_secs() / v.timer.duration().as_secs_f32())).clamp(0.0, 1.0);
+            let t =
+                (1.0 - (v.timer.elapsed_secs() / v.timer.duration().as_secs_f32())).clamp(0.0, 1.0);
             col.0 = Color::rgba(0.8, 0.0, 0.0, 0.35 * t);
         }
-        if v.timer.finished() { commands.entity(e).despawn_recursive(); }
+        if v.timer.finished() {
+            commands.entity(e).despawn_recursive();
+        }
     }
 }
 
 // 右クリックADS時にFOVを切り替える（クライアント視覚のみ）
 fn ads_zoom_system(
     buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut q: Query<&mut Projection, With<Camera3d>>,
-){
-    let Ok(mut proj) = q.get_single_mut() else { return };
+) {
+    let Ok(mut proj) = q.get_single_mut() else {
+        return;
+    };
     if let Projection::Perspective(ref mut p) = *proj {
-        p.fov = if buttons.pressed(MouseButton::Right) { ADS_FOV } else { HIP_FOV };
+        let ads_key = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        p.fov = if buttons.pressed(MouseButton::Right) || ads_key {
+            ADS_FOV
+        } else {
+            HIP_FOV
+        };
     }
 }
