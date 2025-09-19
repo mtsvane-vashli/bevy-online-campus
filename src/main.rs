@@ -36,6 +36,7 @@ const POS_DEADBAND: f32 = 0.05; // meters: small jitterを無視して安定化
 const POS_SNAP: f32 = 0.8; // meters: 乖離が大きい時のみスナップ
 
 const PREDICTION_DT: f32 = 1.0 / 60.0;
+const FIRE_COOLDOWN: f32 = 1.0 / 7.5;
 #[inline]
 fn wrap_pi(a: f32) -> f32 {
     (a + PI).rem_euclid(2.0 * PI) - PI
@@ -84,6 +85,11 @@ struct RoundUi {
 struct LocalAmmo {
     ammo: u16,
     reloading: bool,
+}
+
+#[derive(Resource, Default)]
+struct LocalWeaponState {
+    fire_cd: f32,
 }
 
 // VFX components
@@ -1177,6 +1183,7 @@ fn setup_net_client(mut commands: Commands) {
         ammo: 0,
         reloading: false,
     });
+    commands.insert_resource(LocalWeaponState::default());
     commands.insert_resource(InputBuffer::default());
     commands.insert_resource(LastConfirmedSeq::default());
     commands.insert_resource(LastSnapshotTick::default());
@@ -1414,6 +1421,7 @@ fn net_send_input(
     mut accumulator: ResMut<PredictionAccumulator>,
     mut pending_frames: ResMut<PendingPredictionFrames>,
     last_conf: Res<LastConfirmedSeq>,
+    mut weapon: ResMut<LocalWeaponState>,
     mut recent: ResMut<RecentLocalFires>,
 ) {
     let cam = if let Ok(c) = cam_q.get_single() {
@@ -1426,6 +1434,8 @@ fn net_send_input(
     } else {
         return;
     };
+
+    weapon.fire_cd = (weapon.fire_cd - time.delta_seconds()).max(0.0);
 
     accumulator.remaining += time.delta_seconds();
     if accumulator.remaining > PREDICTION_DT * 5.0 {
@@ -1490,16 +1500,18 @@ fn net_send_input(
         }
     }
 
-    if fire_trigger {
+    if (fire_trigger || fire_hold) && weapon.fire_cd <= 0.0 {
         let origin = cam_tf.translation();
-        let dir: Vec3 = cam_tf.forward().into();
-        if dir.length_squared() > 1e-6 {
+        let forward: Vec3 = cam_tf.forward().into();
+        let shot_dir = forward.normalize_or_zero();
+        if shot_dir.length_squared() > 1e-6 {
             if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire {
                 origin: [origin.x, origin.y, origin.z],
-                dir: [dir.x, dir.y, dir.z],
+                dir: [shot_dir.x, shot_dir.y, shot_dir.z],
             }) {
                 let _ = client.send_message(CH_RELIABLE, bytes);
             }
+            weapon.fire_cd = FIRE_COOLDOWN;
             let col = Color::srgb(0.95, 0.9, 0.2);
             let mmesh = meshes.add(Cuboid::new(0.06, 0.06, 0.06));
             let mmat = materials.add(StandardMaterial {
@@ -1519,7 +1531,7 @@ fn net_send_input(
                     timer: Timer::from_seconds(0.06, TimerMode::Once),
                 },
             ));
-            let seg = dir.normalize_or_zero() * 50.0;
+            let seg = shot_dir * 50.0;
             let len = seg.length();
             if len > 0.001 {
                 let tmesh = meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
@@ -1549,7 +1561,7 @@ fn net_send_input(
             }
             recent
                 .0
-                .push_back((time.elapsed_seconds(), origin, dir.normalize_or_zero()));
+                .push_back((time.elapsed_seconds(), origin, shot_dir));
             while let Some(&(t, _, _)) = recent.0.front() {
                 if time.elapsed_seconds() - t > 0.4 {
                     recent.0.pop_front();
