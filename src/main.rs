@@ -32,9 +32,10 @@ const GRAVITY: f32 = 9.81; // m/s^2
 const JUMP_SPEED: f32 = 5.2; // m/s (必要なら調整)
 const KEY_LOOK_SPEED: f32 = 2.2; // rad/s for arrow-key look
 // Position reconciliation thresholds (light server convergence)
-const POS_DEADBAND: f32 = 0.08; // meters: small jitterを無視して安定化
-const POS_SNAP: f32 = 1.2; // meters: 乖離が大きい時のみスナップ
+const POS_DEADBAND: f32 = 0.05; // meters: small jitterを無視して安定化
+const POS_SNAP: f32 = 0.8; // meters: 乖離が大きい時のみスナップ
 
+const PREDICTION_DT: f32 = 1.0 / 60.0;
 #[inline]
 fn wrap_pi(a: f32) -> f32 {
     (a + PI).rem_euclid(2.0 * PI) - PI
@@ -190,12 +191,11 @@ fn main() {
         .add_systems(Update, mouse_look_system)
         .add_systems(Update, ads_zoom_system)
         .add_systems(Update, keyboard_look_system)
-        .add_systems(Update, kcc_move_system_unified)
-        .add_systems(Update, kcc_post_step_system)
-        .add_systems(Update, client_airborne_snap_control.after(kcc_post_step_system))
         // 見た目弾の生成/更新は削除
         .add_systems(Update, add_mesh_colliders_for_map)
         .add_systems(Update, net_log_connection)
+        .add_systems(Update, net_recv_snapshot)
+        .add_systems(Update, remote_interpolate_system.after(net_recv_snapshot))
         .add_systems(Update, net_send_input
             .after(mouse_look_system)
             .after(keyboard_look_system)
@@ -203,8 +203,9 @@ fn main() {
             .after(handle_focus_events)
             .after(net_recv_snapshot)
         )
-        .add_systems(Update, net_recv_snapshot)
-        .add_systems(Update, remote_interpolate_system.after(net_recv_snapshot))
+        .add_systems(Update, kcc_move_system_unified.after(net_send_input))
+        .add_systems(Update, kcc_post_step_system.after(kcc_move_system_unified))
+        .add_systems(Update, client_airborne_snap_control.after(kcc_post_step_system))
         // replay_unconfirmed_inputs は reconcile_self に統合したため不要
         .add_systems(Update, net_recv_events)
         .add_systems(Update, reconcile_self.after(net_recv_snapshot).after(net_recv_events).before(PhysicsSet::StepSimulation))
@@ -665,56 +666,71 @@ fn kcc_post_step_system(
 
 // サーバ実装と整合したローカルKCC移動（ジャンプ品質を統一）
 fn kcc_move_system_unified(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    cam_q: Query<&PlayerCamera, With<Camera3d>>,
     mut q: Query<(&mut KinematicCharacterController, &mut Controller), With<Player>>,
     ready: Res<MapReady>,
-){
-    if !ready.0 { return; }
-    let (mut kcc, mut ctrl) = if let Ok(v) = q.get_single_mut() { v } else { return };
-    let cam = if let Ok(v) = cam_q.get_single() { v } else { return };
-
-    let mut input = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) { input += Vec3::NEG_Z; }
-    if keys.pressed(KeyCode::KeyS) { input += Vec3::Z; }
-    if keys.pressed(KeyCode::KeyA) { input += Vec3::NEG_X; }
-    if keys.pressed(KeyCode::KeyD) { input += Vec3::X; }
-
-    let mut horiz = Vec3::ZERO;
-    if input.length_squared() > 1e-6 {
-        let yaw_rot = Quat::from_rotation_y(cam.yaw);
-        horiz = (yaw_rot * input).normalize();
+    mut pending: ResMut<PendingPredictionFrames>,
+) {
+    if !ready.0 {
+        pending.0.clear();
+        return;
+    }
+    let (mut kcc, mut ctrl) = if let Ok(pair) = q.get_single_mut() { pair } else { pending.0.clear(); return; };
+    if pending.0.is_empty() {
+        kcc.translation = Some(Vec3::ZERO);
+        return;
     }
 
-    let mut speed = MOVE_SPEED;
-    if buttons.pressed(MouseButton::Right) { speed *= shared_consts::ADS_SPEED_MUL; }
+    let mut total_motion = Vec3::ZERO;
+    let mut disable_snap = false;
 
-    use crate::net::shared::{JUMP_BUFFER_SEC, COYOTE_SEC, JUMP_COOLDOWN_SEC};
-    // 予測誤差低減のため dt を1/60に量子化（サーバは固定60Hz）
-    let tick_dt = 1.0/60.0;
-    let mut dt = time.delta_seconds();
-    dt = (dt / tick_dt).round() * tick_dt;
-    if keys.just_pressed(KeyCode::Space) { ctrl.jump_buf = JUMP_BUFFER_SEC; }
-    if ctrl.jump_buf > 0.0 { ctrl.jump_buf = (ctrl.jump_buf - dt).max(0.0); }
-    if ctrl.jump_cd > 0.0 { ctrl.jump_cd = (ctrl.jump_cd - dt).max(0.0); }
-    if ctrl.on_ground { ctrl.coyote = COYOTE_SEC; } else if ctrl.coyote > 0.0 { ctrl.coyote = (ctrl.coyote - dt).max(0.0); }
+    while let Some(frame) = pending.0.pop_front() {
+        if frame.jump { ctrl.jump_buf = shared_consts::JUMP_BUFFER_SEC; }
+        if ctrl.jump_buf > 0.0 { ctrl.jump_buf = (ctrl.jump_buf - frame.dt).max(0.0); }
+        if ctrl.jump_cd > 0.0 { ctrl.jump_cd = (ctrl.jump_cd - frame.dt).max(0.0); }
+        if ctrl.on_ground {
+            ctrl.coyote = shared_consts::COYOTE_SEC;
+            ctrl.jumps = 0;
+        } else if ctrl.coyote > 0.0 {
+            ctrl.coyote = (ctrl.coyote - frame.dt).max(0.0);
+        }
 
-    ctrl.vy -= shared_consts::GRAVITY * dt;
-    let mut jumped_now = false;
-    if ctrl.jump_buf > 0.0 && ctrl.jump_cd <= 0.0 {
-        if ctrl.on_ground || ctrl.coyote > 0.0 {
-            ctrl.vy = shared_consts::JUMP_SPEED; jumped_now = true; ctrl.jump_buf = 0.0;
-        } else if ctrl.jumps < 1 {
-            ctrl.vy = shared_consts::JUMP_SPEED; ctrl.jumps = ctrl.jumps.saturating_add(1); jumped_now = true; ctrl.jump_buf = 0.0;
+        ctrl.vy -= shared_consts::GRAVITY * frame.dt;
+        let mut jumped_now = false;
+        if ctrl.jump_buf > 0.0 && ctrl.jump_cd <= 0.0 {
+            if ctrl.on_ground || ctrl.coyote > 0.0 {
+                ctrl.vy = shared_consts::JUMP_SPEED;
+                ctrl.jump_buf = 0.0;
+                jumped_now = true;
+            } else if ctrl.jumps < 1 {
+                ctrl.vy = shared_consts::JUMP_SPEED;
+                ctrl.jumps = ctrl.jumps.saturating_add(1);
+                ctrl.jump_buf = 0.0;
+                jumped_now = true;
+            }
+        }
+
+        let mut horiz = Vec3::ZERO;
+        let input = Vec3::new(frame.mv[0], 0.0, frame.mv[1]);
+        if input.length_squared() > 1e-6 {
+            let yaw_rot = Quat::from_rotation_y(frame.yaw);
+            horiz = (yaw_rot * input).normalize();
+        }
+        let mut speed = MOVE_SPEED;
+        if frame.ads { speed *= shared_consts::ADS_SPEED_MUL; }
+        let motion = horiz * speed * frame.dt + Vec3::Y * ctrl.vy * frame.dt;
+        total_motion += motion;
+
+        if jumped_now {
+            ctrl.on_ground = false;
+            ctrl.jump_cd = shared_consts::JUMP_COOLDOWN_SEC;
+            disable_snap = true;
         }
     }
-    if jumped_now { kcc.snap_to_ground = None; ctrl.on_ground = false; ctrl.jump_cd = JUMP_COOLDOWN_SEC; }
 
-    let motion = horiz * speed * dt + Vec3::Y * ctrl.vy * dt;
-    kcc.translation = Some(motion);
+    if disable_snap { kcc.snap_to_ground = None; }
+    kcc.translation = Some(total_motion);
 }
+
 
 // 空中時は地面スナップを無効化して「地上にワープ」する補正を防ぐ。
 fn client_airborne_snap_control(
@@ -893,6 +909,15 @@ struct LocalHealth { hp: u16 }
 // 入力再適用のための最小バッファ/ACK（将来の拡張に備えた土台）
 #[derive(Resource, Default)]
 struct InputBuffer(std::collections::VecDeque<InputFrame>);
+#[derive(Resource, Default)]
+struct PredictionAccumulator {
+    remaining: f32,
+    pending_jump: bool,
+}
+
+#[derive(Resource, Default)]
+struct PendingPredictionFrames(std::collections::VecDeque<InputFrame>);
+
 
 #[derive(Resource, Default)]
 struct LastConfirmedSeq(Option<u32>);
@@ -924,6 +949,8 @@ fn setup_net_client(mut commands: Commands) {
     commands.insert_resource(LocalNetInfo { id: client_id.raw() });
     commands.insert_resource(RemoteMap::default());
     commands.insert_resource(InputSeq::default());
+    commands.insert_resource(PredictionAccumulator::default());
+    commands.insert_resource(PendingPredictionFrames::default());
     commands.insert_resource(AuthoritativeSelf::default());
     commands.insert_resource(LocalHealth { hp: 100 });
     commands.insert_resource(ScoreData::default());
@@ -1111,40 +1138,65 @@ fn net_send_input(
     mut client: ResMut<RenetClient>,
     mut seq: ResMut<InputSeq>,
     mut buf: ResMut<InputBuffer>,
+    mut accumulator: ResMut<PredictionAccumulator>,
+    mut pending_frames: ResMut<PendingPredictionFrames>,
     last_conf: Res<LastConfirmedSeq>,
     mut recent: ResMut<RecentLocalFires>,
 ) {
     let cam = if let Ok(c) = cam_q.get_single() { c } else { return };
     let cam_tf = if let Ok(t) = cam_tf_q.get_single() { t } else { return };
+
+    accumulator.remaining += time.delta_seconds();
+    if accumulator.remaining > PREDICTION_DT * 5.0 {
+        accumulator.remaining = PREDICTION_DT * 5.0;
+    }
+
     let mut mv = [0.0f32, 0.0f32];
     if keys.pressed(KeyCode::KeyW) { mv[1] -= 1.0; }
     if keys.pressed(KeyCode::KeyS) { mv[1] += 1.0; }
     if keys.pressed(KeyCode::KeyA) { mv[0] -= 1.0; }
     if keys.pressed(KeyCode::KeyD) { mv[0] += 1.0; }
-    // スプリント削除: run フラグ無し
-    let jump = keys.just_pressed(KeyCode::Space);
-    // 連射: 押しっぱなしで true を送り続ける
-    let fire = buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::KeyF);
-    // 右クリックADS（送信用フラグ）
+
+    let fire_hold = buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::KeyF);
+    let fire_trigger = buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF);
+    if keys.just_pressed(KeyCode::Space) { accumulator.pending_jump = true; }
     let ads = buttons.pressed(MouseButton::Right);
-    seq.0 = seq.0.wrapping_add(1);
-    let dt = time.delta_seconds();
-    let frame = InputFrame { seq: seq.0, mv, jump, fire, ads, yaw: cam.yaw, pitch: cam.pitch, dt };
-    buf.0.push_back(frame.clone());
-    if let Some(ack) = last_conf.0 {
-        while let Some(front) = buf.0.front() { if front.seq <= ack { buf.0.pop_front(); } else { break; } }
+
+    while accumulator.remaining >= PREDICTION_DT {
+        accumulator.remaining -= PREDICTION_DT;
+        seq.0 = seq.0.wrapping_add(1);
+        let jump = if accumulator.pending_jump {
+            accumulator.pending_jump = false;
+            true
+        } else {
+            false
+        };
+        let frame = InputFrame {
+            seq: seq.0,
+            mv,
+            jump,
+            fire: fire_hold,
+            ads,
+            yaw: cam.yaw,
+            pitch: cam.pitch,
+            dt: PREDICTION_DT,
+        };
+        buf.0.push_back(frame.clone());
+        pending_frames.0.push_back(frame.clone());
+        if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) { let _ = client.send_message(CH_INPUT, bytes); }
     }
-    if let Ok(bytes) = bincode::serialize(&ClientMessage::Input(frame)) { let _ = client.send_message(CH_INPUT, bytes); }
-    // 射撃要求はカメラの原点・方向を添えて信頼チャネルで即送信
-    // サーバ権威の射撃イベント（起点のみ信頼送信）
-    if buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF) {
+
+    if let Some(ack) = last_conf.0 {
+        while let Some(front) = buf.0.front() {
+            if front.seq <= ack { buf.0.pop_front(); } else { break; }
+        }
+    }
+
+    if fire_trigger {
         let origin = cam_tf.translation();
         let dir: Vec3 = cam_tf.forward().into();
         if dir.length_squared() > 1e-6 {
-            if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire { origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] }) {
-                let _ = client.send_message(CH_RELIABLE, bytes);
-            }
-            // ローカル即時VFX（サーバ確認を待たない）
+            if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire { origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] }) { let _ = client.send_message(CH_RELIABLE, bytes); }
             let col = Color::srgb(0.95, 0.9, 0.2);
             let mmesh = meshes.add(Cuboid::new(0.06, 0.06, 0.06));
             let mmat = materials.add(StandardMaterial { base_color: col, emissive: col.into(), unlit: true, ..default() });
@@ -1157,12 +1209,12 @@ fn net_send_input(
                 let pos = origin + seg * 0.5;
                 commands.spawn((PbrBundle { mesh: tmesh, material: tmat, transform: Transform { translation: pos, rotation: rot, scale: Vec3::ONE }, ..default() }, TracerFx { timer: Timer::from_seconds(0.06, TimerMode::Once) }));
             }
-            // 重複抑止のため記録
             recent.0.push_back((time.elapsed_seconds(), origin, dir.normalize_or_zero()));
             while let Some(&(t, _, _)) = recent.0.front() { if time.elapsed_seconds() - t > 0.4 { recent.0.pop_front(); } else { break; } }
         }
     }
 }
+
 
 fn net_recv_snapshot(
     mut commands: Commands,
@@ -1450,6 +1502,64 @@ fn net_recv_events(
 }
 
 // 自分プレイヤーの補正（簡易リコンシリエーション）
+fn predict_position_from_inputs(
+    base: Vec3,
+    mut vy: f32,
+    mut grounded: bool,
+    inputs: &std::collections::VecDeque<InputFrame>,
+) -> Vec3 {
+    let mut pos = base;
+    let mut jump_buf = 0.0f32;
+    let mut jump_cd = 0.0f32;
+    let mut coyote = if grounded { shared_consts::COYOTE_SEC } else { 0.0 };
+    let mut used_jumps: u8 = if grounded { 0 } else { 1 };
+
+    for frame in inputs {
+        if frame.jump { jump_buf = shared_consts::JUMP_BUFFER_SEC; }
+        if jump_buf > 0.0 { jump_buf = (jump_buf - frame.dt).max(0.0); }
+        if jump_cd > 0.0 { jump_cd = (jump_cd - frame.dt).max(0.0); }
+        if grounded {
+            coyote = shared_consts::COYOTE_SEC;
+            used_jumps = 0;
+        } else if coyote > 0.0 {
+            coyote = (coyote - frame.dt).max(0.0);
+        }
+
+        vy -= shared_consts::GRAVITY * frame.dt;
+        let mut jumped = false;
+        if jump_buf > 0.0 && jump_cd <= 0.0 {
+            if grounded || coyote > 0.0 {
+                vy = shared_consts::JUMP_SPEED;
+                jump_buf = 0.0;
+                jump_cd = shared_consts::JUMP_COOLDOWN_SEC;
+                grounded = false;
+                jumped = true;
+            } else if used_jumps < 1 {
+                vy = shared_consts::JUMP_SPEED;
+                used_jumps = used_jumps.saturating_add(1);
+                jump_buf = 0.0;
+                jump_cd = shared_consts::JUMP_COOLDOWN_SEC;
+                jumped = true;
+            }
+        }
+
+        let mut horiz = Vec3::ZERO;
+        let input = Vec3::new(frame.mv[0], 0.0, frame.mv[1]);
+        if input.length_squared() > 1e-6 {
+            let yaw_rot = Quat::from_rotation_y(frame.yaw);
+            horiz = (yaw_rot * input).normalize();
+        }
+        let mut speed = MOVE_SPEED;
+        if frame.ads { speed *= shared_consts::ADS_SPEED_MUL; }
+        pos += horiz * speed * frame.dt + Vec3::Y * vy * frame.dt;
+
+        if jumped { grounded = false; }
+        if vy <= 0.0 { grounded = false; }
+    }
+
+    pos
+}
+
 fn reconcile_self(
     time: Res<Time>,
     mut q: Query<&mut Transform, With<Player>>,
@@ -1464,22 +1574,12 @@ fn reconcile_self(
         // 未確定入力を再適用した予測ターゲットを作る（簡易）
         let mut target = base;
         if !buf.0.is_empty() {
-            let mut vy = self_auth.vy.unwrap_or(0.0);
-            // サーバで接地中なら空中ジャンプ消費を0に、空中なら1から開始（単純化）
-            let mut used_jumps: u8 = if self_auth.grounded.unwrap_or(true) { 0 } else { 1 };
-            for f in buf.0.iter() {
-                let mut horiz = Vec3::ZERO;
-                let input = Vec3::new(f.mv[0], 0.0, f.mv[1]);
-                if input.length_squared() > 1e-6 {
-                    let yaw_rot = Quat::from_rotation_y(f.yaw);
-                    horiz = (yaw_rot * input).normalize();
-                }
-            let mut speed = MOVE_SPEED;
-            if f.ads { speed *= shared_consts::ADS_SPEED_MUL; }
-            if f.jump && (used_jumps == 0) { vy = shared_consts::JUMP_SPEED; used_jumps = used_jumps.saturating_add(1); }
-            vy -= shared_consts::GRAVITY * f.dt;
-            target += horiz * speed * f.dt + Vec3::Y * vy * f.dt;
-        }
+            target = predict_position_from_inputs(
+                base,
+                self_auth.vy.unwrap_or(0.0),
+                self_auth.grounded.unwrap_or(true),
+                &buf.0,
+            );
         }
         let diff = target - tf.translation;
         let d = diff.length();
@@ -1497,7 +1597,7 @@ fn reconcile_self(
                 return;
             }
             // Smooth correction within thresholds (collidable via KCC).
-            let rate = 10.0; // per second (少し強めにして発散を抑える)
+            let rate = 6.0; // per second (gentle correction to avoid warps)
             let step = (rate * time.delta_seconds()).min(1.0);
             let mut corr = diff * step;
             if !grounded { corr.y = 0.0; }
