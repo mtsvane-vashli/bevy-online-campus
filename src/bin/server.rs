@@ -1780,6 +1780,10 @@ fn srv_shoot_and_respawn(
         };
         // クライアント由来の射撃（origin/dir）があれば優先処理し、以降の通常フローはスキップ
         if let Some((origin, forward)) = firemap.remove(&id) {
+            let shot_dir = forward.normalize_or_zero();
+            if shot_dir.length_squared() < 1e-6 {
+                continue;
+            }
             let w = wpnprot.weapons.0.entry(id).or_insert(WeaponStatus {
                 ammo: MAG_SIZE,
                 cooldown: 0.0,
@@ -1826,7 +1830,7 @@ fn srv_shoot_and_respawn(
                         if let Some(cpos) = rewind_pos(&s.hist, *tid, t_query) {
                             if let Some(t) = ray_cylinder_hit(
                                 origin,
-                                forward,
+                                shot_dir,
                                 range,
                                 cpos,
                                 HIT_HEIGHT_HALF,
@@ -1844,7 +1848,7 @@ fn srv_shoot_and_respawn(
                         if let Some(cpos) = rewind_pos(&s.hist, *tid, t_query) {
                             if let Some(t) = ray_cylinder_hit(
                                 origin,
-                                forward,
+                                shot_dir,
                                 range,
                                 cpos,
                                 HIT_HEIGHT_HALF,
@@ -1865,16 +1869,16 @@ fn srv_shoot_and_respawn(
                         filter = filter.exclude_collider(self_ent);
                     }
                     if let Some((hit_ent, _)) =
-                        rapier.cast_ray(origin, forward, t_hit, true, filter)
+                        rapier.cast_ray(origin, shot_dir, t_hit, true, filter)
                     {
                         let target_ent_h = ents.0.get(&hid).copied();
                         let target_ent_b = bot_ents.0.get(&hid).copied();
                         if Some(hit_ent) == target_ent_h || Some(hit_ent) == target_ent_b {
                             hit_id_opt = Some(hid);
                             hit_point = Some([
-                                origin.x + forward.x * t_hit,
-                                origin.y + forward.y * t_hit,
-                                origin.z + forward.z * t_hit,
+                                origin.x + shot_dir.x * t_hit,
+                                origin.y + shot_dir.y * t_hit,
+                                origin.z + shot_dir.z * t_hit,
                             ]);
                         }
                     }
@@ -1882,7 +1886,7 @@ fn srv_shoot_and_respawn(
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire {
                     id,
                     origin: [origin.x, origin.y, origin.z],
-                    dir: [forward.x, forward.y, forward.z],
+                    dir: [shot_dir.x, shot_dir.y, shot_dir.z],
                     hit: hit_point,
                 })) {
                     for cid in s.server.clients_id() {
