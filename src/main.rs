@@ -608,17 +608,57 @@ fn kcc_post_step_system(
     mut qk: Query<&mut KinematicCharacterController, With<Player>>,
 ) {
     let (mut ctrl, output) = if let Ok(v) = q.get_single_mut() { v } else { return };
+    let mut shallow_debug: Option<(f32, Vec<(Entity, Vec3)>)> = None;
     if let Some(out) = output {
         ctrl.on_ground = out.grounded;
+        let mut grounded_by_floor = false;
         if out.grounded && ctrl.vy <= 0.0 {
-            ctrl.vy = 0.0;
-            ctrl.jumps = 0; // 地上に戻ったら空中ジャンプ回数をリセット
+            let prev_vy = ctrl.vy;
+            let mut shallow_contacts = Vec::new();
+            for col in &out.collisions {
+                // 壁など浅い法線で接地扱いになったケースを記録
+                if let Some(details) = col.hit.details {
+                    let normal: Vec3 = details.normal1.into();
+                    if normal.y >= 0.5 {
+                        grounded_by_floor = true;
+                    } else {
+                        shallow_contacts.push((col.entity, normal));
+                    }
+                }
+            }
+            if grounded_by_floor {
+                ctrl.vy = 0.0;
+                ctrl.jumps = 0; // 地上に戻ったので空中ジャンプ回数をリセット
+            } else if !shallow_contacts.is_empty() {
+                shallow_debug = Some((prev_vy, shallow_contacts));
+            }
+        }
+        if !grounded_by_floor {
+            ctrl.on_ground = false;
         }
     }
     // ジャンプフレームで無効化した snap_to_ground を復帰
     if let Ok(mut kcc) = qk.get_single_mut() {
-        if kcc.snap_to_ground.is_none() {
-            kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
+        if let Some((prev_vy, shallow_contacts)) = shallow_debug.take() {
+            let normals: Vec<String> = shallow_contacts
+                .iter()
+                .map(|(entity, normal)| format!("{:?}:({:.2},{:.2},{:.2})", entity, normal.x, normal.y, normal.z))
+                .collect();
+            info!(
+                target: "kcc::grounding",
+                "grounded via shallow normal prev_vy={:.3} snap_to_ground={} normals={:?}",
+                prev_vy,
+                kcc.snap_to_ground.is_some(),
+                normals,
+            );
+            // 浅い法線で接地扱いになっているのでスナップを強制解除
+            kcc.snap_to_ground = None;
+        } else if ctrl.on_ground {
+            if kcc.snap_to_ground.is_none() {
+                kcc.snap_to_ground = Some(CharacterLength::Absolute(0.25));
+            }
+        } else {
+            kcc.snap_to_ground = None;
         }
     }
 }
@@ -1140,7 +1180,10 @@ fn net_recv_snapshot(
 ) {
     while let Some(raw) = client.receive_message(CH_SNAPSHOT) {
         if let Ok(ServerMessage::Snapshot(snap)) = bincode::deserialize::<ServerMessage>(&raw) {
-            if matches!(std::env::var("NET_SNAPSHOT_LOG").ok(), Some(_)) && snap.players.len() > 0 {
+            if matches!(
+                std::env::var("NET_SNAPSHOT_LOG").ok().as_deref(),
+                Some("1" | "true" | "TRUE")
+            ) && snap.players.len() > 0 {
                 info!("client: snapshot players={}", snap.players.len());
             }
             // 入力ACK: このクライアントの直近確定seqを拾い、未確定バッファの整理に使う
