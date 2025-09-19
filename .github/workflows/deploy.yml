@@ -1,0 +1,52 @@
+# ワークフローの名前
+name: Deploy Bevy Server
+
+# ワークフローが実行されるトリガー
+on:
+  push:
+    branches:
+      - main  # mainブランチにプッシュされた時のみ実行
+
+jobs:
+  deploy:
+    # 実行環境
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. リポジトリのコードをチェックアウト
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. SSH経由でVPSにデプロイコマンドを実行
+    - name: Deploy to VPS via SSH
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.VPS_SSH_HOST }}
+        username: ${{ secrets.VPS_SSH_USERNAME }}
+        key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        script: |
+          # 実行したいコマンドをここに記述
+          cd ~/bevy-online-campus
+          git pull
+          
+          # Rustのツールチェインをインストール（VPSに初回設定済みなら不要かも）
+          # curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # source "$HOME/.cargo/env"
+
+          echo "Building server binary..."
+          cargo build --release --bin server
+          
+          echo "Updating server binary..."
+          sudo cp target/release/server /opt/bevy/server.new
+          sudo chmod +x /opt/bevy/server.new
+          
+          # 以前のバージョンをバックアップ
+          sudo mv /opt/bevy/server /opt/bevy/server.prev || true
+          
+          # 新しいバージョンを配置
+          sudo mv /opt/bevy/server.new /opt/bevy/server
+          
+          echo "Restarting bevy-server service..."
+          sudo systemctl restart bevy-server
+          
+          echo "Deployment completed!"
