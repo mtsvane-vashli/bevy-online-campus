@@ -8,6 +8,7 @@ use bevy::render::camera::Projection;
 use bevy::window::CursorGrabMode;
 use bevy::window::WindowFocused;
 use bevy_rapier3d::prelude::*;
+use bevy_rapier3d::render::{DebugRenderContext, RapierDebugRenderPlugin};
 use bevy_renet::renet::RenetClient;
 use bevy_renet::transport::NetcodeClientPlugin;
 use bevy_renet::RenetClientPlugin;
@@ -221,10 +222,16 @@ fn main() {
         }))
         .add_plugins((RenetClientPlugin, NetcodeClientPlugin))
         .add_plugins(FrameTimeDiagnosticsPlugin)
+        .insert_resource(DebugRenderContext {
+            enabled: matches!(
+                std::env::var("DEBUG_COLLIDERS").ok().as_deref(),
+                Some("1" | "true" | "TRUE")
+            ),
+            ..Default::default()
+        })
         .add_plugins((
             RapierPhysicsPlugin::<NoUserData>::default(),
-            // デバッグ表示が欲しい場合は下を有効化
-            // RapierDebugRenderPlugin::default(),
+            RapierDebugRenderPlugin::default(),
         ))
         .add_systems(
             Startup,
@@ -242,6 +249,7 @@ fn main() {
         .add_systems(Update, mouse_look_system)
         .add_systems(Update, ads_zoom_system)
         .add_systems(Update, keyboard_look_system)
+        .add_systems(Update, toggle_debug_colliders)
         // 見た目弾の生成/更新は削除
         .add_systems(Update, add_mesh_colliders_for_map)
         .add_systems(Update, net_log_connection)
@@ -702,6 +710,20 @@ fn keyboard_look_system(
     let mut player_query = q.p0();
     if let Ok(mut player_tf) = player_query.get_single_mut() {
         player_tf.rotation = Quat::from_rotation_y(new_yaw);
+    }
+}
+
+fn toggle_debug_colliders(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut ctx: ResMut<DebugRenderContext>,
+) {
+    if keys.just_pressed(KeyCode::F3) {
+        ctx.enabled = !ctx.enabled;
+        info!(
+            target: "debug",
+            "rapier collider debug render {}",
+            if ctx.enabled { "enabled" } else { "disabled" }
+        );
     }
 }
 

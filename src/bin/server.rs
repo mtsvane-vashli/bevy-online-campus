@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::env;
 use std::time::Duration;
+use std::sync::OnceLock;
 
 #[path = "../net.rs"]
 mod net;
@@ -210,6 +211,58 @@ const HIST_MAX_SEC: f32 = 1.5; // 履歴保持時間
 const HIT_HEIGHT_HALF: f32 = 0.6; // カプセル半高さ（Collider::capsule_y と一致）
 const HIT_RADIUS: f32 = 0.3; // カプセル半径
 const HIT_OCCLUSION_EPS: f32 = 0.15; // ラグ補償位置と物理ワールド位置のズレ吸収用
+
+fn occlusion_debug_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        matches!(
+            std::env::var("DEBUG_OCCLUSION").ok().as_deref(),
+            Some("1" | "true" | "TRUE")
+        )
+    })
+}
+
+fn log_occlusion_block(
+    msg: &str,
+    shooter: u64,
+    target: u64,
+    origin: Vec3,
+    dir: Vec3,
+    intended_t: f32,
+    blocked: Option<(Entity, f32)>,
+) {
+    if !occlusion_debug_enabled() {
+        return;
+    }
+    match blocked {
+        Some((ent, toi)) => {
+            let block_pos = origin + dir * toi;
+            info!(
+                target: "shoot::occlusion",
+                "{} shooter={} target={} blocked_by={:?} intended_t={:.3} block_t={:.3} pos=({:.2},{:.2},{:.2})",
+                msg,
+                shooter,
+                target,
+                ent,
+                intended_t,
+                toi,
+                block_pos.x,
+                block_pos.y,
+                block_pos.z
+            );
+        }
+        None => {
+            info!(
+                target: "shoot::occlusion",
+                "{} shooter={} target={} blocked_by=None intended_t={:.3}",
+                msg,
+                shooter,
+                target,
+                intended_t
+            );
+        }
+    }
+}
 
 // --- Jump quality (server-authoritative) ---
 const JUMP_BUFFER_SEC: f32 = 0.12; // 押下先行受付
@@ -1910,7 +1963,27 @@ fn srv_shoot_and_respawn(
                                 origin.y + shot_dir.y * impact_t,
                                 origin.z + shot_dir.z * impact_t,
                             ]);
+                        } else {
+                            log_occlusion_block(
+                                "client-fire blocked by other collider",
+                                id,
+                                hid,
+                                origin,
+                                shot_dir,
+                                t_hit,
+                                Some((hit_ent, toi_phys)),
+                            );
                         }
+                    } else {
+                        log_occlusion_block(
+                            "client-fire occlusion ray missed",
+                            id,
+                            hid,
+                            origin,
+                            shot_dir,
+                            t_hit,
+                            None,
+                        );
                     }
                 }
                 if let Ok(bytes) = bincode::serialize(&ServerMessage::Event(EventMsg::Fire {
@@ -2133,16 +2206,34 @@ fn srv_shoot_and_respawn(
                 }
                 if players.states.contains_key(&hit_id) {
                     let max_toi = (t_hit + HIT_OCCLUSION_EPS).min(range);
-                    if let Some((hit_ent, _toi)) =
+                    if let Some((hit_ent, toi_phys)) =
                         rapier.cast_ray(origin, forward, max_toi, true, filter)
                     {
                         // 射線上の障害物チェック（自分自身のコライダーは除外）
                         let target_ent = ents.0.get(&hit_id).copied();
                         let target_ent_bot = bot_ents.0.get(&hit_id).copied();
                         if Some(hit_ent) != target_ent && Some(hit_ent) != target_ent_bot {
+                            log_occlusion_block(
+                                "server-check blocked by other collider",
+                                id,
+                                hit_id,
+                                origin,
+                                forward,
+                                t_hit,
+                                Some((hit_ent, toi_phys)),
+                            );
                             continue;
                         }
                     } else {
+                        log_occlusion_block(
+                            "server-check occlusion ray missed",
+                            id,
+                            hit_id,
+                            origin,
+                            forward,
+                            t_hit,
+                            None,
+                        );
                         continue;
                     }
                 }
