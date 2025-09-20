@@ -1432,8 +1432,8 @@ fn net_send_input(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    cam_q: Query<&PlayerCamera, With<Camera3d>>,
-    cam_tf_q: Query<&GlobalTransform, With<Camera3d>>,
+    cam_q: Query<(&Transform, &PlayerCamera), With<Camera3d>>,
+    player_tf_q: Query<&Transform, With<Player>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -1446,13 +1446,13 @@ fn net_send_input(
     mut weapon: ResMut<LocalWeaponState>,
     mut recent: ResMut<RecentLocalFires>,
 ) {
-    let cam = if let Ok(c) = cam_q.get_single() {
-        c
+    let (cam_tf_local, cam) = if let Ok(v) = cam_q.get_single() {
+        v
     } else {
         return;
     };
-    let cam_tf = if let Ok(t) = cam_tf_q.get_single() {
-        t
+    let player_tf = if let Ok(tf) = player_tf_q.get_single() {
+        tf
     } else {
         return;
     };
@@ -1478,14 +1478,26 @@ fn net_send_input(
         mv[0] += 1.0;
     }
 
+    let ads_key = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let ads = buttons.pressed(MouseButton::Right) || ads_key;
+
     let fire_hold = buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::KeyF);
     let fire_trigger = buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyF);
     if keys.just_pressed(KeyCode::Space) {
         accumulator.pending_jump = true;
     }
-    let ads_key = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let ads = buttons.pressed(MouseButton::Right) || ads_key;
 
+    let yaw_rot = player_tf.rotation;
+    let pitch_rot = Quat::from_rotation_x(cam.pitch);
+    let forward = yaw_rot * (pitch_rot * Vec3::NEG_Z);
+    let origin = player_tf.translation + yaw_rot * cam_tf_local.translation;
+    let shot_dir = forward.normalize_or_zero();
+
+    let can_fire_now = (fire_trigger || fire_hold)
+        && weapon.fire_cd <= 0.0
+        && shot_dir.length_squared() > 1e-6;
+
+    let mut fire_flag_sent = false;
     while accumulator.remaining >= PREDICTION_DT {
         accumulator.remaining -= PREDICTION_DT;
         seq.0 = seq.0.wrapping_add(1);
@@ -1495,11 +1507,15 @@ fn net_send_input(
         } else {
             false
         };
+        let fire_event = can_fire_now && !fire_flag_sent;
+        if fire_event {
+            fire_flag_sent = true;
+        }
         let frame = InputFrame {
             seq: seq.0,
             mv,
             jump,
-            fire: fire_hold,
+            fire: fire_event,
             ads,
             yaw: cam.yaw,
             pitch: cam.pitch,
@@ -1522,74 +1538,69 @@ fn net_send_input(
         }
     }
 
-    if (fire_trigger || fire_hold) && weapon.fire_cd <= 0.0 {
-        let origin = cam_tf.translation();
-        let forward: Vec3 = cam_tf.forward().into();
-        let shot_dir = forward.normalize_or_zero();
-        if shot_dir.length_squared() > 1e-6 {
-            if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire {
-                origin: [origin.x, origin.y, origin.z],
-                dir: [shot_dir.x, shot_dir.y, shot_dir.z],
-            }) {
-                let _ = client.send_message(CH_RELIABLE, bytes);
-            }
-            weapon.fire_cd = FIRE_COOLDOWN;
-            let col = Color::srgb(0.95, 0.9, 0.2);
-            let mmesh = meshes.add(Cuboid::new(0.06, 0.06, 0.06));
-            let mmat = materials.add(StandardMaterial {
+    if can_fire_now {
+        if let Ok(bytes) = bincode::serialize(&ClientMessage::Fire {
+            origin: [origin.x, origin.y, origin.z],
+            dir: [shot_dir.x, shot_dir.y, shot_dir.z],
+        }) {
+            let _ = client.send_message(CH_RELIABLE, bytes);
+        }
+        weapon.fire_cd = FIRE_COOLDOWN;
+        let col = Color::srgb(0.95, 0.9, 0.2);
+        let mmesh = meshes.add(Cuboid::new(0.06, 0.06, 0.06));
+        let mmat = materials.add(StandardMaterial {
+            base_color: col,
+            emissive: col.into(),
+            unlit: true,
+            ..default()
+        });
+        commands.spawn((
+            PbrBundle {
+                mesh: mmesh,
+                material: mmat,
+                transform: Transform::from_translation(origin),
+                ..default()
+            },
+            MuzzleFx {
+                timer: Timer::from_seconds(0.06, TimerMode::Once),
+            },
+        ));
+        let seg = shot_dir * 50.0;
+        let len = seg.length();
+        if len > 0.001 {
+            let tmesh = meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
+            let tmat = materials.add(StandardMaterial {
                 base_color: col,
                 emissive: col.into(),
                 unlit: true,
                 ..default()
             });
+            let rot = Quat::from_rotation_arc(Vec3::Z, seg.normalize());
+            let pos = origin + seg * 0.5;
             commands.spawn((
                 PbrBundle {
-                    mesh: mmesh,
-                    material: mmat,
-                    transform: Transform::from_translation(origin),
+                    mesh: tmesh,
+                    material: tmat,
+                    transform: Transform {
+                        translation: pos,
+                        rotation: rot,
+                        scale: Vec3::ONE,
+                    },
                     ..default()
                 },
-                MuzzleFx {
+                TracerFx {
                     timer: Timer::from_seconds(0.06, TimerMode::Once),
                 },
             ));
-            let seg = shot_dir * 50.0;
-            let len = seg.length();
-            if len > 0.001 {
-                let tmesh = meshes.add(Cuboid::new(0.02, 0.02, len.max(0.05)));
-                let tmat = materials.add(StandardMaterial {
-                    base_color: col,
-                    emissive: col.into(),
-                    unlit: true,
-                    ..default()
-                });
-                let rot = Quat::from_rotation_arc(Vec3::Z, seg.normalize());
-                let pos = origin + seg * 0.5;
-                commands.spawn((
-                    PbrBundle {
-                        mesh: tmesh,
-                        material: tmat,
-                        transform: Transform {
-                            translation: pos,
-                            rotation: rot,
-                            scale: Vec3::ONE,
-                        },
-                        ..default()
-                    },
-                    TracerFx {
-                        timer: Timer::from_seconds(0.06, TimerMode::Once),
-                    },
-                ));
-            }
-            recent
-                .0
-                .push_back((time.elapsed_seconds(), origin, shot_dir));
-            while let Some(&(t, _, _)) = recent.0.front() {
-                if time.elapsed_seconds() - t > 0.4 {
-                    recent.0.pop_front();
-                } else {
-                    break;
-                }
+        }
+        recent
+            .0
+            .push_back((time.elapsed_seconds(), origin, shot_dir));
+        while let Some(&(t, _, _)) = recent.0.front() {
+            if time.elapsed_seconds() - t > 0.4 {
+                recent.0.pop_front();
+            } else {
+                break;
             }
         }
     }
