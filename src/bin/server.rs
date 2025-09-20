@@ -209,6 +209,7 @@ const LAG_COMP_SEC: f32 = 0.10; // 100ms 固定巻き戻し
 const HIST_MAX_SEC: f32 = 1.5; // 履歴保持時間
 const HIT_HEIGHT_HALF: f32 = 0.6; // カプセル半高さ（Collider::capsule_y と一致）
 const HIT_RADIUS: f32 = 0.3; // カプセル半径
+const HIT_OCCLUSION_EPS: f32 = 0.15; // ラグ補償位置と物理ワールド位置のズレ吸収用
 
 // --- Jump quality (server-authoritative) ---
 const JUMP_BUFFER_SEC: f32 = 0.12; // 押下先行受付
@@ -1895,17 +1896,19 @@ fn srv_shoot_and_respawn(
                     if let Some(&self_ent) = ents.0.get(&id) {
                         filter = filter.exclude_collider(self_ent);
                     }
-                    if let Some((hit_ent, _)) =
-                        rapier.cast_ray(origin, shot_dir, t_hit, true, filter)
+                    let max_toi = (t_hit + HIT_OCCLUSION_EPS).min(range);
+                    if let Some((hit_ent, toi_phys)) =
+                        rapier.cast_ray(origin, shot_dir, max_toi, true, filter)
                     {
                         let target_ent_h = ents.0.get(&hid).copied();
                         let target_ent_b = bot_ents.0.get(&hid).copied();
                         if Some(hit_ent) == target_ent_h || Some(hit_ent) == target_ent_b {
+                            let impact_t = toi_phys.min(t_hit);
                             hit_id_opt = Some(hid);
                             hit_point = Some([
-                                origin.x + shot_dir.x * t_hit,
-                                origin.y + shot_dir.y * t_hit,
-                                origin.z + shot_dir.z * t_hit,
+                                origin.x + shot_dir.x * impact_t,
+                                origin.y + shot_dir.y * impact_t,
+                                origin.z + shot_dir.z * impact_t,
                             ]);
                         }
                     }
@@ -2129,15 +2132,18 @@ fn srv_shoot_and_respawn(
                     filter = filter.exclude_collider(self_ent);
                 }
                 if players.states.contains_key(&hit_id) {
+                    let max_toi = (t_hit + HIT_OCCLUSION_EPS).min(range);
                     if let Some((hit_ent, _toi)) =
-                        rapier.cast_ray(origin, forward, t_hit, true, filter)
+                        rapier.cast_ray(origin, forward, max_toi, true, filter)
                     {
-                        // もし最初に当たったのが狙っているプレイヤー本人なら遮蔽なしとみなす
+                        // 射線上の障害物チェック（自分自身のコライダーは除外）
                         let target_ent = ents.0.get(&hit_id).copied();
                         let target_ent_bot = bot_ents.0.get(&hit_id).copied();
                         if Some(hit_ent) != target_ent && Some(hit_ent) != target_ent_bot {
                             continue;
                         }
+                    } else {
+                        continue;
                     }
                 }
                 if let Some(hit) = players.states.get_mut(&hit_id) {
