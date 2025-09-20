@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"]
+﻿// #![windows_subsystem = "windows"]
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
@@ -152,13 +152,11 @@ struct MapReady(pub bool);
 const SCAFFOLD_SIZE: Vec3 = Vec3::new(2.0, 0.5, 2.0); // WxHxD (meters)
 const SCAFFOLD_RANGE: f32 = 5.0; // meters
 const SCAFFOLD_HP: i32 = 150;
-const SCAFFOLD_LIFETIME: f32 = 10.0; // seconds
 const SCAFFOLD_PER_PLAYER_LIMIT: usize = 3;
 
 #[derive(Component)]
 struct Scaffold {
     hp: i32,
-    life: Timer,
     owner: u64,
 }
 
@@ -285,7 +283,7 @@ fn main() {
         .add_systems(Update, hud_update_ammo)
         .add_systems(Update, fps_update_system)
         .add_systems(Update, scaffold_input_system)
-        .add_systems(Update, (vfx_tick_and_cleanup, scaffold_tick_and_cleanup))
+        .add_systems(Update, vfx_tick_and_cleanup)
         .run();
 }
 
@@ -1363,7 +1361,6 @@ fn scaffold_input_system(
             },
             Scaffold {
                 hp: SCAFFOLD_HP,
-                life: Timer::from_seconds(SCAFFOLD_LIFETIME, TimerMode::Once),
                 owner: local_id.id,
             },
             Collider::cuboid(
@@ -1376,24 +1373,6 @@ fn scaffold_input_system(
         .id();
 
     owned.0.push(ent);
-}
-
-fn scaffold_tick_and_cleanup(
-    time: Res<Time>,
-    mut commands: Commands,
-    mut q: Query<(Entity, &mut Scaffold)>,
-    mut owned: ResMut<LocalScaffolds>,
-) {
-    for (e, mut sc) in &mut q {
-        sc.life.tick(time.delta());
-        if sc.life.finished() {
-            commands.entity(e).despawn_recursive();
-            // 所有リストからも除去
-            if let Some(idx) = owned.0.iter().position(|x| *x == e) {
-                owned.0.remove(idx);
-            }
-        }
-    }
 }
 
 fn hud_update_ammo(mut q: Query<&mut Text, With<UiAmmo>>, ammo: Res<LocalAmmo>) {
@@ -2355,3 +2334,5 @@ fn ads_zoom_system(
         };
     }
 }
+
+

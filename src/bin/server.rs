@@ -272,13 +272,12 @@ const JUMP_COOLDOWN_SEC: f32 = 0.15; // 連打誤爆防止
 // ===== Scaffold params (server authority; クライアントと合わせる) =====
 const SCAFFOLD_SIZE: Vec3 = Vec3::new(2.0, 0.5, 2.0);
 const SCAFFOLD_RANGE: f32 = 5.0;
-const SCAFFOLD_LIFETIME: f32 = 10.0;
 const SCAFFOLD_PER_PLAYER_LIMIT: usize = 3;
 
 #[derive(Resource, Default)]
 struct Scaffolds {
-    // sid -> (owner, pos, remaining_life_sec)
-    by_id: HashMap<u64, (u64, Vec3, f32)>,
+    // sid -> (owner, pos)
+    by_id: HashMap<u64, (u64, Vec3)>,
     // owner -> [sid FIFO]
     per_owner: HashMap<u64, Vec<u64>>,
 }
@@ -408,7 +407,6 @@ fn main() {
         .add_systems(FixedUpdate, update_position_history)
         .add_systems(FixedUpdate, srv_shoot_and_respawn)
         .add_systems(FixedUpdate, process_scaffold_requests)
-        .add_systems(FixedUpdate, scaffold_tick_and_cleanup_srv)
         .add_systems(FixedUpdate, bot_ai_shoot_and_respawn)
         .add_systems(FixedUpdate, broadcast_snapshots)
         .add_systems(FixedUpdate, round_update)
@@ -515,7 +513,7 @@ fn accept_clients(
                     let _ = server.send_message(client_id, CH_RELIABLE, bytes);
                 }
                 // 既存の足場を新規クライアントにのみ通知
-                for (sid, (owner, pos, _life)) in scaffolds.by_id.iter() {
+                for (sid, (owner, pos)) in scaffolds.by_id.iter() {
                     let ev = ServerMessage::Event(EventMsg::ScaffoldSpawn {
                         sid: *sid,
                         owner: *owner,
@@ -1210,7 +1208,7 @@ fn process_scaffold_requests(
         scaffolds.per_owner.entry(owner).or_default().push(sid);
         scaffolds
             .by_id
-            .insert(sid, (owner, place, SCAFFOLD_LIFETIME));
+            .insert(sid, (owner, place));
 
         let ev = ServerMessage::Event(EventMsg::ScaffoldSpawn {
             sid,
@@ -1220,49 +1218,6 @@ fn process_scaffold_requests(
         if let Ok(bytes) = bincode::serialize(&ev) {
             for cid in server.clients_id() {
                 let _ = server.send_message(cid, CH_RELIABLE, bytes.clone());
-            }
-        }
-    }
-}
-
-fn scaffold_tick_and_cleanup_srv(
-    time_fixed: Res<Time<Fixed>>,
-    mut commands: Commands,
-    mut scaffolds: ResMut<Scaffolds>,
-    mut sc_ents: ResMut<ScaffoldEntities>,
-    mut server: ResMut<RenetServer>,
-) {
-    let dt = time_fixed.delta_seconds();
-    if scaffolds.by_id.is_empty() {
-        return;
-    }
-    let mut expired: Vec<u64> = Vec::new();
-    for (sid, (_owner, _pos, life)) in scaffolds.by_id.iter_mut() {
-        *life -= dt;
-        if *life <= 0.0 {
-            expired.push(*sid);
-        }
-    }
-    if expired.is_empty() {
-        return;
-    }
-    for sid in expired {
-        if let Some((_owner, _pos, _)) = scaffolds.by_id.remove(&sid) {
-            if let Some(e) = sc_ents.0.remove(&sid) {
-                commands.entity(e).despawn_recursive();
-            }
-            // per_owner からも削除
-            for v in scaffolds.per_owner.values_mut() {
-                if let Some(i) = v.iter().position(|x| *x == sid) {
-                    v.remove(i);
-                    break;
-                }
-            }
-            let ev = ServerMessage::Event(EventMsg::ScaffoldDespawn { sid });
-            if let Ok(bytes) = bincode::serialize(&ev) {
-                for cid in server.clients_id() {
-                    let _ = server.send_message(cid, CH_RELIABLE, bytes.clone());
-                }
             }
         }
     }
