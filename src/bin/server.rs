@@ -1443,40 +1443,67 @@ fn ray_cylinder_hit(
     half_h: f32,
     radius: f32,
 ) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    let mut best_t = range;
+    let margin = 0.05;
+
+    // finite cylinder part (aligned to Y)
     let dx = dir.x;
     let dz = dir.z;
-    let dy = dir.y;
     let a = dx * dx + dz * dz;
-    if a < 1e-6 {
-        return None;
-    }
-    let ox = origin.x - center.x;
-    let oz = origin.z - center.z;
-    let oy = origin.y;
-    let b = 2.0 * (dx * ox + dz * oz);
-    let c = ox * ox + oz * oz - radius * radius;
-    let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
-        return None;
-    }
-    let sqrt_disc = disc.sqrt();
-    let mut t0 = (-b - sqrt_disc) / (2.0 * a);
-    let mut t1 = (-b + sqrt_disc) / (2.0 * a);
-    if t0 > t1 {
-        std::mem::swap(&mut t0, &mut t1);
-    }
-    let mut pick: Option<f32> = None;
-    for &t in [t0, t1].iter() {
-        if t < 0.0 || t > range {
-            continue;
-        }
-        let y = oy + dy * t;
-        if y >= center.y - half_h - 0.05 && y <= center.y + half_h + 0.05 {
-            pick = Some(t);
-            break;
+    if a >= 1e-6 {
+        let ox = origin.x - center.x;
+        let oz = origin.z - center.z;
+        let b = 2.0 * (dx * ox + dz * oz);
+        let c = ox * ox + oz * oz - radius * radius;
+        let disc = b * b - 4.0 * a * c;
+        if disc >= 0.0 {
+            let sqrt_disc = disc.sqrt();
+            let mut roots = [(-b - sqrt_disc) / (2.0 * a), (-b + sqrt_disc) / (2.0 * a)];
+            roots.sort_by(|l, r| l.partial_cmp(r).unwrap_or(std::cmp::Ordering::Equal));
+            for t in roots {
+                if t < 0.0 || t > best_t {
+                    continue;
+                }
+                let y = origin.y + dir.y * t;
+                if y >= center.y - half_h - margin && y <= center.y + half_h + margin {
+                    best_t = t;
+                    best = Some(t);
+                    break;
+                }
+            }
         }
     }
-    pick
+
+    // spherical caps
+    let a_s = dir.length_squared();
+    if a_s >= 1e-6 {
+        for cap_sign in [-1.0f32, 1.0f32] {
+            let cap_center = center + Vec3::Y * (cap_sign * half_h);
+            let oc = origin - cap_center;
+            let b = 2.0 * oc.dot(dir);
+            let c = oc.length_squared() - radius * radius;
+            let disc = b * b - 4.0 * a_s * c;
+            if disc < 0.0 {
+                continue;
+            }
+            let sqrt_disc = disc.sqrt();
+            let mut roots = [(-b - sqrt_disc) / (2.0 * a_s), (-b + sqrt_disc) / (2.0 * a_s)];
+            roots.sort_by(|l, r| l.partial_cmp(r).unwrap_or(std::cmp::Ordering::Equal));
+            for t in roots {
+                if t < 0.0 || t > best_t {
+                    continue;
+                }
+                if t <= range {
+                    best_t = t;
+                    best = Some(t);
+                    break;
+                }
+            }
+        }
+    }
+
+    best
 }
 
 fn bot_ai_shoot_and_respawn(
