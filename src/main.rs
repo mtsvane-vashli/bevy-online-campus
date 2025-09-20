@@ -222,6 +222,10 @@ fn main() {
         }))
         .add_plugins((RenetClientPlugin, NetcodeClientPlugin))
         .add_plugins(FrameTimeDiagnosticsPlugin)
+        .add_plugins((
+            RapierPhysicsPlugin::<NoUserData>::default(),
+            RapierDebugRenderPlugin::default(),
+        ))
         .insert_resource(DebugRenderContext {
             enabled: matches!(
                 std::env::var("DEBUG_COLLIDERS").ok().as_deref(),
@@ -229,10 +233,6 @@ fn main() {
             ),
             ..Default::default()
         })
-        .add_plugins((
-            RapierPhysicsPlugin::<NoUserData>::default(),
-            RapierDebugRenderPlugin::default(),
-        ))
         .add_systems(
             Startup,
             (
