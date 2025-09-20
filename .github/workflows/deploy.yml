@@ -29,14 +29,12 @@ jobs:
           set -e # コマンドが失敗したら即座にスクリプトを終了する
           
           cd ~/bevy-online-campus
-          
-          git status
-          
-          git pull
+
+          git fetch origin
+  
+          git reset --hard origin/main
           
           source "$HOME/.cargo/env"
-          
-          cargo --version
           
           cargo build --release --bin server
           
